@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -20,6 +21,7 @@ import (
 const (
 	runAsHostAgentCLIEnv     = "_OCR_HOSTAGENT_CLI_MODE"
 	hostAgentCLIArgvFileEnv  = "_OCR_HOSTAGENT_CLI_ARGV_FILE"
+	hostAgentCLIArgvLogEnv   = "_OCR_HOSTAGENT_CLI_ARGV_LOG"
 	hostAgentCLIStdinFileEnv = "_OCR_HOSTAGENT_CLI_STDIN_FILE"
 	hostAgentCLIPidFileEnv   = "_OCR_HOSTAGENT_CLI_PID_FILE"
 )
@@ -34,9 +36,18 @@ func TestMain(m *testing.M) {
 }
 
 func runFakeHostAgentCLI(mode string) {
+	args := os.Args[1:]
 	if p := os.Getenv(hostAgentCLIArgvFileEnv); p != "" {
-		b, _ := json.Marshal(os.Args[1:])
+		b, _ := json.Marshal(args)
 		_ = os.WriteFile(p, b, 0o600)
+	}
+	if p := os.Getenv(hostAgentCLIArgvLogEnv); p != "" {
+		b, _ := json.Marshal(args)
+		f, err := os.OpenFile(p, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+		if err == nil {
+			_, _ = f.Write(append(b, '\n'))
+			_ = f.Close()
+		}
 	}
 	stdin, _ := io.ReadAll(os.Stdin)
 	if p := os.Getenv(hostAgentCLIStdinFileEnv); p != "" {
@@ -231,6 +242,9 @@ func TestCLITransport_ArgvResumeSystemPromptAndTools(t *testing.T) {
 		if hasFlag(args, "--resume") {
 			t.Errorf("argv %v has --resume with empty SessionID", args)
 		}
+		if hasFlag(args, "--session-id") {
+			t.Errorf("argv %v has --session-id with empty SessionID", args)
+		}
 		if hasFlag(args, "--system-prompt") {
 			t.Errorf("argv %v has --system-prompt with empty System", args)
 		}
@@ -241,7 +255,7 @@ func TestCLITransport_ArgvResumeSystemPromptAndTools(t *testing.T) {
 			t.Errorf("prompt was passed as argv; it must go on stdin")
 		}
 	})
-	t.Run("resume and system-prompt present when set", func(t *testing.T) {
+	t.Run("session-id and system-prompt present on first call", func(t *testing.T) {
 		tr, argvFile, _ := newTestCLI(t, "happy")
 		req := sampleHostAgentRequest()
 		req.System = "You are a reviewer."
@@ -250,7 +264,7 @@ func TestCLITransport_ArgvResumeSystemPromptAndTools(t *testing.T) {
 			t.Fatalf("Complete: %v", err)
 		}
 		args := readArgv(t, argvFile)
-		assertFlagValue(t, args, "--resume", "sess-1")
+		assertSessionStart(t, args, "sess-1")
 		assertFlagValue(t, args, "--system-prompt", "You are a reviewer.")
 		assertFlagValue(t, args, "--tools", "")
 	})
@@ -264,6 +278,140 @@ func TestCLITransport_ArgvResumeSystemPromptAndTools(t *testing.T) {
 		args := readArgv(t, argvFile)
 		if hasFlag(args, "--model") {
 			t.Errorf("argv %v has --model with empty Model", args)
+		}
+	})
+}
+
+func TestCLITransport_SessionIDFirstThenResume(t *testing.T) {
+	const (
+		idA = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+		idB = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+	)
+
+	t.Run("first call uses session-id, second uses resume", func(t *testing.T) {
+		tr, argvFile, _ := newTestCLI(t, "happy")
+		req := sampleHostAgentRequest()
+		req.SessionID = idA
+
+		if _, _, err := tr.Complete(context.Background(), req); err != nil {
+			t.Fatalf("first Complete: %v", err)
+		}
+		assertSessionStart(t, readArgv(t, argvFile), idA)
+
+		if _, _, err := tr.Complete(context.Background(), req); err != nil {
+			t.Fatalf("second Complete: %v", err)
+		}
+		assertSessionResume(t, readArgv(t, argvFile), idA)
+	})
+
+	t.Run("distinct ids each start with session-id", func(t *testing.T) {
+		tr, argvFile, _ := newTestCLI(t, "happy")
+		reqA := sampleHostAgentRequest()
+		reqA.SessionID = idA
+		reqB := sampleHostAgentRequest()
+		reqB.SessionID = idB
+
+		if _, _, err := tr.Complete(context.Background(), reqA); err != nil {
+			t.Fatalf("Complete A: %v", err)
+		}
+		assertSessionStart(t, readArgv(t, argvFile), idA)
+
+		if _, _, err := tr.Complete(context.Background(), reqB); err != nil {
+			t.Fatalf("Complete B: %v", err)
+		}
+		assertSessionStart(t, readArgv(t, argvFile), idB)
+
+		if _, _, err := tr.Complete(context.Background(), reqA); err != nil {
+			t.Fatalf("second Complete A: %v", err)
+		}
+		assertSessionResume(t, readArgv(t, argvFile), idA)
+	})
+
+	t.Run("concurrent distinct ids both start", func(t *testing.T) {
+		tr, argvFile, _ := newTestCLI(t, "happy")
+		ids := []string{idA, idB}
+		errs := make([]error, len(ids))
+		var wg sync.WaitGroup
+		wg.Add(len(ids))
+		for i, id := range ids {
+			i, id := i, id
+			go func() {
+				defer wg.Done()
+				req := sampleHostAgentRequest()
+				req.SessionID = id
+				_, _, errs[i] = tr.Complete(context.Background(), req)
+			}()
+		}
+		wg.Wait()
+		for i, err := range errs {
+			if err != nil {
+				t.Fatalf("Complete[%d]: %v", i, err)
+			}
+		}
+		dumps := readArgvLog(t, argvFile)
+		if len(dumps) != 2 {
+			t.Fatalf("argv log has %d entries, want 2", len(dumps))
+		}
+		seen := map[string]string{}
+		for _, args := range dumps {
+			flag, value := sessionFlag(args)
+			if flag == "" {
+				t.Errorf("argv %v has no session flag", args)
+				continue
+			}
+			seen[value] = flag
+		}
+		if seen[idA] != "--session-id" {
+			t.Errorf("id A flag = %q, want --session-id (log=%v)", seen[idA], dumps)
+		}
+		if seen[idB] != "--session-id" {
+			t.Errorf("id B flag = %q, want --session-id (log=%v)", seen[idB], dumps)
+		}
+	})
+
+	t.Run("concurrent same id one start one resume", func(t *testing.T) {
+		tr, argvFile, _ := newTestCLI(t, "happy")
+		errs := make([]error, 2)
+		var wg sync.WaitGroup
+		wg.Add(2)
+		for i := range errs {
+			i := i
+			go func() {
+				defer wg.Done()
+				req := sampleHostAgentRequest()
+				req.SessionID = idA
+				_, _, errs[i] = tr.Complete(context.Background(), req)
+			}()
+		}
+		wg.Wait()
+		for i, err := range errs {
+			if err != nil {
+				t.Fatalf("Complete[%d]: %v", i, err)
+			}
+		}
+		dumps := readArgvLog(t, argvFile)
+		if len(dumps) != 2 {
+			t.Fatalf("argv log has %d entries, want 2", len(dumps))
+		}
+		starts, resumes := 0, 0
+		for _, args := range dumps {
+			switch flag, value := sessionFlag(args); flag {
+			case "--session-id":
+				if value != idA {
+					t.Errorf("--session-id = %q, want %s", value, idA)
+				}
+				starts++
+			case "--resume":
+				if value != idA {
+					t.Errorf("--resume = %q, want %s", value, idA)
+				}
+				resumes++
+			default:
+				t.Errorf("argv %v has session flag %q, want --session-id or --resume", args, flag)
+			}
+		}
+		if starts != 1 || resumes != 1 {
+			t.Errorf("starts=%d resumes=%d, want 1 and 1 (log=%v)", starts, resumes, dumps)
 		}
 	})
 }
@@ -285,6 +433,7 @@ func newTestCLI(t *testing.T, mode string) (*cliTransport, string, string) {
 	tr.extraEnv = []string{
 		runAsHostAgentCLIEnv + "=" + mode,
 		hostAgentCLIArgvFileEnv + "=" + argvFile,
+		hostAgentCLIArgvLogEnv + "=" + filepath.Join(dir, "argv.log"),
 		hostAgentCLIStdinFileEnv + "=" + stdinFile,
 		hostAgentCLIPidFileEnv + "=" + filepath.Join(dir, "pid"),
 	}
@@ -302,6 +451,70 @@ func readArgv(t *testing.T, path string) []string {
 		t.Fatalf("argv dump: %v", err)
 	}
 	return args
+}
+
+func readArgvLog(t *testing.T, argvFile string) [][]string {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(filepath.Dir(argvFile), "argv.log"))
+	if err != nil {
+		t.Fatalf("read argv log: %v", err)
+	}
+	var out [][]string
+	for _, line := range bytes.Split(b, []byte("\n")) {
+		line = bytes.TrimSpace(line)
+		if len(line) == 0 {
+			continue
+		}
+		var args []string
+		if err := json.Unmarshal(line, &args); err != nil {
+			t.Fatalf("argv log: %v", err)
+		}
+		out = append(out, args)
+	}
+	return out
+}
+
+func sessionFlag(args []string) (flag, value string) {
+	hasSID := hasFlag(args, "--session-id")
+	hasResume := hasFlag(args, "--resume")
+	switch {
+	case hasSID && hasResume:
+		return "both", ""
+	case hasSID:
+		return "--session-id", flagValue(args, "--session-id")
+	case hasResume:
+		return "--resume", flagValue(args, "--resume")
+	default:
+		return "", ""
+	}
+}
+
+func flagValue(args []string, flag string) string {
+	for i, a := range args {
+		if a == flag {
+			if i+1 < len(args) {
+				return args[i+1]
+			}
+			return ""
+		}
+	}
+	return ""
+}
+
+func assertSessionStart(t *testing.T, args []string, id string) {
+	t.Helper()
+	assertFlagValue(t, args, "--session-id", id)
+	if hasFlag(args, "--resume") {
+		t.Errorf("argv %v has --resume; first call for an id must use --session-id", args)
+	}
+}
+
+func assertSessionResume(t *testing.T, args []string, id string) {
+	t.Helper()
+	assertFlagValue(t, args, "--resume", id)
+	if hasFlag(args, "--session-id") {
+		t.Errorf("argv %v has --session-id; subsequent call must use --resume", args)
+	}
 }
 
 func hasFlag(args []string, flag string) bool {
