@@ -420,7 +420,9 @@ func retryCodesMiddleware(codes []int) func(*http.Request, func(*http.Request) (
 // NewLLMClient creates the appropriate client based on the resolved endpoint protocol.
 // protocol dispatch (canonical names from protocol.go):
 //   - ProtocolAnthropic ("anthropic") -> AnthropicClient
+//   - ProtocolAnthropicBedrock ("anthropic-bedrock") -> AnthropicBedrockClient
 //   - ProtocolOpenAIResponses ("openai-responses") -> OpenAIResponsesClient
+//   - ProtocolHostAgent ("host-agent") -> HostAgentClient over cliTransport
 //   - ProtocolOpenAIChatCompletions ("openai") or anything else -> OpenAIClient
 //
 // The defensive default keeps legacy callers that somehow bypass resolver
@@ -446,6 +448,9 @@ func NewLLMClient(ep ResolvedEndpoint, collector *RetryCollector, raw *RawHolder
 		rawHolder:      raw,
 		AWSProfile:     ep.AWSProfile,
 		AWSRegion:      ep.AWSRegion,
+		AgentCommand:   ep.AgentCommand,
+		AgentArgs:      ep.AgentArgs,
+		AgentEnv:       ep.AgentEnv,
 	}
 	switch ep.Protocol {
 	case ProtocolAnthropic:
@@ -454,6 +459,10 @@ func NewLLMClient(ep ResolvedEndpoint, collector *RetryCollector, raw *RawHolder
 		return NewAnthropicBedrockClient(cfg)
 	case ProtocolOpenAIResponses:
 		return NewOpenAIResponsesClient(cfg)
+	case ProtocolHostAgent:
+		tr := newCLITransport(cfg.AgentCommand, cfg.AgentArgs)
+		tr.extraEnv = cfg.AgentEnv
+		return NewHostAgentClient(tr)
 	default:
 		return NewOpenAIClient(cfg)
 	}
