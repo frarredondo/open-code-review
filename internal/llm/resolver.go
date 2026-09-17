@@ -83,6 +83,7 @@ const (
 type ResolveOptions struct {
 	Provider string
 	Model    string
+	Agent    string
 }
 
 // ResolveEndpoint resolves an endpoint without per-run overrides.
@@ -341,12 +342,20 @@ type providerEntryConfig struct {
 	AWSRegion  string `json:"aws_region,omitempty"`
 }
 
+// hostAgentFileConfig is one named entry under host_agents in config.json.
+type hostAgentFileConfig struct {
+	Command string   `json:"command,omitempty"`
+	Args    []string `json:"args,omitempty"`
+	Env     []string `json:"env,omitempty"`
+}
+
 type configFile struct {
 	Provider        string                         `json:"provider,omitempty"`
 	Model           string                         `json:"model,omitempty"`
 	Providers       map[string]providerEntryConfig `json:"providers,omitempty"`
 	CustomProviders map[string]providerEntryConfig `json:"custom_providers,omitempty"`
 	Llm             llmFileConfig                  `json:"llm,omitempty"`
+	HostAgents      map[string]hostAgentFileConfig `json:"host_agents,omitempty"`
 }
 
 // tryOCRConfig reads the OCR config file.
