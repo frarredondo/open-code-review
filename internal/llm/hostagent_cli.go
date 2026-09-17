@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -27,10 +28,15 @@ var hostAgentCLIWaitDelay = 5 * time.Second
 const hostAgentCLIStderrMax = 64 << 10
 
 // cliTransport runs a host-agent CLI (Claude Code) as a one-shot subprocess.
+// One instance is shared across concurrent group subtasks, so started
+// session ids are guarded by mu.
 type cliTransport struct {
 	command   string
 	extraArgs []string
 	extraEnv  []string
+
+	mu      sync.Mutex
+	started map[string]struct{}
 }
 
 func newCLITransport(command string, extraArgs []string) *cliTransport {
@@ -101,9 +107,27 @@ func (t *cliTransport) buildArgs(req HostAgentRequest, schemaPath string) []stri
 		args = append(args, "--system-prompt", req.System)
 	}
 	if req.SessionID != "" {
-		args = append(args, "--resume", req.SessionID)
+		// First call for an id uses --session-id so the harness creates a
+		// conversation under OCR's UUID (`claude --help` on v2.1.274:
+		// "Use a specific session ID for the conversation (must be a
+		// valid UUID)"). Later calls use --resume, which then names a
+		// session that exists.
+		args = append(args, t.sessionFlag(req.SessionID), req.SessionID)
 	}
 	return args
+}
+
+func (t *cliTransport) sessionFlag(id string) string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.started == nil {
+		t.started = make(map[string]struct{})
+	}
+	if _, ok := t.started[id]; ok {
+		return "--resume"
+	}
+	t.started[id] = struct{}{}
+	return "--session-id"
 }
 
 func writeHostAgentSchemaFile(schema map[string]any) (string, error) {
