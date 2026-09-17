@@ -44,6 +44,12 @@ type ResolvedEndpoint struct {
 	// providers. Empty means "let the AWS SDK decide".
 	AWSProfile string
 	AWSRegion  string
+
+	// AgentCommand, AgentArgs, and AgentEnv configure the host-agent
+	// subprocess. Empty for every other protocol.
+	AgentCommand string
+	AgentArgs    []string
+	AgentEnv     []string
 }
 
 // Environment variable names for OCR-specific configuration.

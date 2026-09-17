@@ -382,6 +382,12 @@ type ClientConfig struct {
 	// Empty means the standard AWS credential chain decides.
 	AWSProfile string
 	AWSRegion  string
+
+	// AgentCommand, AgentArgs, and AgentEnv are used only by host-agent.
+	// Empty for every other protocol.
+	AgentCommand string
+	AgentArgs    []string
+	AgentEnv     []string
 }
 
 // retryCodesMiddleware returns an HTTP middleware that forces the SDK to retry
