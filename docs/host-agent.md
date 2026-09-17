@@ -45,10 +45,11 @@ combination rather than picking one.
 
 `args` is prepended to the argv OCR already builds (`--bare`, `-p`,
 `--output-format json`, `--json-schema <tempfile>`, `--tools ""`, plus
-`--model`, `--system-prompt`, and `--resume` when set). Do not repeat
-those flags. Values that start with `-` need a `--` separator so
-`ocr config set` does not treat them as its own flags. `--foo` below is
-a placeholder for extra harness flags you actually need:
+`--model` and `--system-prompt` when set, and `--session-id` or
+`--resume` once a conversation id exists). Do not repeat those flags.
+Values that start with `-` need a `--` separator so `ocr config set`
+does not treat them as its own flags. `--foo` below is a placeholder
+for extra harness flags you actually need:
 
 ```bash
 ocr config set host_agents.claude-code.args -- '["--foo"]'
@@ -105,10 +106,10 @@ transport makes none. `ocr review` still runs; the report has nothing
 to list.
 
 **Prompt caching depends on session continuity.** For each main-task
-loop OCR generates a conversation id and passes it as `--resume` on
-every round of that loop, so a harness that honors `--resume` can
-reuse its cache. A harness that does not will re-read context each
-round.
+loop OCR generates a conversation UUID. The first CLI call for that id
+passes `--session-id` so the harness creates a session under OCR's id;
+later rounds pass `--resume` with the same id. A harness that does not
+honor those flags will re-read context each round.
 
 **Check your harness's terms.** Driving a subscription-authenticated
 CLI as an inference backend for a third-party tool may not be
