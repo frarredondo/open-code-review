@@ -549,6 +549,76 @@ func TestCLITransport_SessionIDFirstThenResume(t *testing.T) {
 			t.Errorf("starts=%d resumes=%d, want 1 and 1 (log=%v)", starts, resumes, dumps)
 		}
 	})
+
+	t.Run("failed first call does not mark the id started", func(t *testing.T) {
+		for _, tc := range []struct {
+			name string
+			mode string
+		}{
+			{"non-zero exit", "exit-empty-stderr"},
+			{"is_error", "error-success-subtype"},
+			{"missing structured_output", "no-structured-output"},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				tr, argvFile, _ := newTestCLI(t, tc.mode)
+				req := sampleHostAgentRequest()
+				req.SessionID = idA
+				if _, _, err := tr.Complete(context.Background(), req); err == nil {
+					t.Fatal("first Complete succeeded")
+				}
+				assertSessionStart(t, readArgv(t, argvFile), idA)
+
+				setCLIMode(tr, "happy")
+				if _, _, err := tr.Complete(context.Background(), req); err != nil {
+					t.Fatalf("retry Complete: %v", err)
+				}
+				assertSessionStart(t, readArgv(t, argvFile), idA)
+			})
+		}
+	})
+
+	t.Run("concurrent same id failed starts both use session-id", func(t *testing.T) {
+		tr, argvFile, _ := newTestCLI(t, "exit-empty-stderr")
+		errs := make([]error, 2)
+		var wg sync.WaitGroup
+		wg.Add(2)
+		for i := range errs {
+			i := i
+			go func() {
+				defer wg.Done()
+				req := sampleHostAgentRequest()
+				req.SessionID = idA
+				_, _, errs[i] = tr.Complete(context.Background(), req)
+			}()
+		}
+		wg.Wait()
+		for i, err := range errs {
+			if err == nil {
+				t.Fatalf("Complete[%d] succeeded", i)
+			}
+		}
+		dumps := readArgvLog(t, argvFile)
+		if len(dumps) != 2 {
+			t.Fatalf("argv log has %d entries, want 2", len(dumps))
+		}
+		starts, resumes := 0, 0
+		for _, args := range dumps {
+			switch flag, value := sessionFlag(args); flag {
+			case "--session-id":
+				if value != idA {
+					t.Errorf("--session-id = %q, want %s", value, idA)
+				}
+				starts++
+			case "--resume":
+				resumes++
+			default:
+				t.Errorf("argv %v has session flag %q, want --session-id", args, flag)
+			}
+		}
+		if starts != 2 || resumes != 0 {
+			t.Errorf("starts=%d resumes=%d, want 2 and 0 (log=%v)", starts, resumes, dumps)
+		}
+	})
 }
 
 func sampleHostAgentRequest() HostAgentRequest {
@@ -573,6 +643,17 @@ func newTestCLI(t *testing.T, mode string) (*cliTransport, string, string) {
 		hostAgentCLIPidFileEnv + "=" + filepath.Join(dir, "pid"),
 	}
 	return tr, argvFile, stdinFile
+}
+
+func setCLIMode(tr *cliTransport, mode string) {
+	prefix := runAsHostAgentCLIEnv + "="
+	for i, e := range tr.extraEnv {
+		if strings.HasPrefix(e, prefix) {
+			tr.extraEnv[i] = prefix + mode
+			return
+		}
+	}
+	tr.extraEnv = append(tr.extraEnv, prefix+mode)
 }
 
 func readArgv(t *testing.T, path string) []string {
