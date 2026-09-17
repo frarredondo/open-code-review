@@ -30,17 +30,25 @@ const hostAgentCLIStderrMax = 64 << 10
 // cliTransport runs a host-agent CLI (Claude Code) as a one-shot subprocess.
 // One instance is shared across concurrent group subtasks, so started
 // session ids are guarded by mu.
+//
+// started grows by one entry per conversation for the lifetime of a
+// single ocr run. That bound is negligible; revisit if cliTransport were
+// ever reused across runs.
 type cliTransport struct {
 	command   string
 	extraArgs []string
 	extraEnv  []string
 
-	mu      sync.Mutex
-	started map[string]struct{}
+	mu       sync.Mutex
+	cond     *sync.Cond
+	started  map[string]struct{}
+	inflight map[string]struct{}
 }
 
 func newCLITransport(command string, extraArgs []string) *cliTransport {
-	return &cliTransport{command: command, extraArgs: extraArgs}
+	t := &cliTransport{command: command, extraArgs: extraArgs}
+	t.cond = sync.NewCond(&t.mu)
+	return t
 }
 
 func (t *cliTransport) Complete(ctx context.Context, req HostAgentRequest) ([]byte, *UsageInfo, error) {
@@ -51,6 +59,11 @@ func (t *cliTransport) Complete(ctx context.Context, req HostAgentRequest) ([]by
 	schemaJSON, err := json.Marshal(schema)
 	if err != nil {
 		return nil, nil, fmt.Errorf("host-agent CLI schema: %w", err)
+	}
+
+	if req.SessionID != "" {
+		t.claimSessionTurn(req.SessionID)
+		defer t.releaseSessionTurn(req.SessionID)
 	}
 
 	args := t.buildArgs(req, string(schemaJSON))
@@ -88,6 +101,9 @@ func (t *cliTransport) Complete(ctx context.Context, req HostAgentRequest) ([]by
 	if len(bytes.TrimSpace(raw)) == 0 || string(raw) == "null" {
 		return nil, nil, fmt.Errorf("host-agent CLI success response missing structured_output")
 	}
+	if req.SessionID != "" {
+		t.markSessionStarted(req.SessionID)
+	}
 	return append([]byte(nil), raw...), usageFromCLI(parsed.Usage), nil
 }
 
@@ -119,22 +135,61 @@ func (t *cliTransport) buildArgs(req HostAgentRequest, schemaJSON string) []stri
 		// "Use a specific session ID for the conversation (must be a
 		// valid UUID)"). Later calls use --resume, which then names a
 		// session that exists.
-		args = append(args, t.sessionFlag(req.SessionID), req.SessionID)
+		args = append(args, t.sessionFlagFor(req.SessionID), req.SessionID)
 	}
 	return args
 }
 
-func (t *cliTransport) sessionFlag(id string) string {
+// sessionFlagFor is read-only: it does not record the id as started.
+func (t *cliTransport) sessionFlagFor(id string) string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if _, ok := t.started[id]; ok {
+		return "--resume"
+	}
+	return "--session-id"
+}
+
+func (t *cliTransport) markSessionStarted(id string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if t.started == nil {
 		t.started = make(map[string]struct{})
 	}
-	if _, ok := t.started[id]; ok {
-		return "--resume"
-	}
 	t.started[id] = struct{}{}
-	return "--session-id"
+}
+
+// claimSessionTurn serializes first calls for the same id. Two goroutines
+// can both observe "not started"; without this wait both would pass
+// --session-id for a UUID the harness is still creating. Duplicate
+// --session-id is not known-safe (the same class of mismatch as --resume
+// of a session that was never created). Group subtasks mint distinct
+// ids, so the wait is only the rare same-id overlap. Resume calls do
+// not take the inflight slot.
+func (t *cliTransport) claimSessionTurn(id string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.inflight == nil {
+		t.inflight = make(map[string]struct{})
+	}
+	for {
+		if _, ok := t.started[id]; ok {
+			return
+		}
+		if _, ok := t.inflight[id]; ok {
+			t.cond.Wait()
+			continue
+		}
+		t.inflight[id] = struct{}{}
+		return
+	}
+}
+
+func (t *cliTransport) releaseSessionTurn(id string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	delete(t.inflight, id)
+	t.cond.Broadcast()
 }
 
 // hostAgentCLIResult is a permissive decode of --output-format json.
