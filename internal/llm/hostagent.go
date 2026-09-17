@@ -12,25 +12,40 @@ import (
 	"github.com/google/uuid"
 )
 
-// Transport sends a prompt plus JSON Schema to a host-agent inference backend
-// and returns the raw structured bytes. Client depends only on this interface.
-type Transport interface {
-	Complete(ctx context.Context, prompt string, schema map[string]any) (raw []byte, usage *UsageInfo, err error)
+// HostAgentRequest is the payload a HostAgentTransport needs to run one turn.
+type HostAgentRequest struct {
+	System    string
+	Prompt    string
+	Schema    map[string]any
+	Model     string
+	MaxTokens int
+	SessionID string
 }
 
-// Client is an LLMClient that turns ChatRequest tools into a JSON Schema,
-// delegates inference to a Transport, and maps the structured result back.
-type Client struct {
-	transport Transport
+// HostAgentTransport sends a structured request to a host-agent inference
+// backend and returns the raw JSON bytes. HostAgentClient depends only on this
+// interface.
+type HostAgentTransport interface {
+	Complete(ctx context.Context, req HostAgentRequest) (raw []byte, usage *UsageInfo, err error)
 }
 
-// NewClient returns a Client that uses transport for inference.
-func NewClient(transport Transport) *Client {
-	return &Client{transport: transport}
+// HostAgentClient is an LLMClient that turns ChatRequest tools into a JSON
+// Schema, delegates inference to a HostAgentTransport, and maps the structured
+// result back.
+type HostAgentClient struct {
+	transport HostAgentTransport
 }
 
-func (c *Client) CompletionsWithCtx(ctx context.Context, req ChatRequest) (*ChatResponse, error) {
-	raw, usage, err := c.transport.Complete(ctx, promptFromMessages(req.Messages), schemaForTools(req.Tools))
+// NewHostAgentClient returns a HostAgentClient that uses transport for inference.
+func NewHostAgentClient(transport HostAgentTransport) *HostAgentClient {
+	return &HostAgentClient{transport: transport}
+}
+
+func (c *HostAgentClient) CompletionsWithCtx(ctx context.Context, req ChatRequest) (*ChatResponse, error) {
+	raw, usage, err := c.transport.Complete(ctx, HostAgentRequest{
+		Prompt: promptFromMessages(req.Messages),
+		Schema: schemaForTools(req.Tools),
+	})
 	if err != nil {
 		return nil, err
 	}

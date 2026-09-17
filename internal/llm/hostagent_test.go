@@ -4,6 +4,7 @@
 package llm
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -13,16 +14,14 @@ import (
 )
 
 type fakeTransport struct {
-	raw    []byte
-	usage  *UsageInfo
-	err    error
-	prompt string
-	schema map[string]any
+	raw   []byte
+	usage *UsageInfo
+	err   error
+	got   HostAgentRequest
 }
 
-func (f *fakeTransport) Complete(ctx context.Context, prompt string, schema map[string]any) ([]byte, *UsageInfo, error) {
-	f.prompt = prompt
-	f.schema = schema
+func (f *fakeTransport) Complete(ctx context.Context, req HostAgentRequest) ([]byte, *UsageInfo, error) {
+	f.got = req
 	return f.raw, f.usage, f.err
 }
 
@@ -67,14 +66,18 @@ func TestSchemaForTools_EveryToolDefShapeGetsABranch(t *testing.T) {
 
 	schema := schemaForTools(tools)
 	branches := oneOfBranches(t, schema)
-	if len(branches) != len(tools)+1 {
-		t.Fatalf("oneOf len = %d, want %d (one per tool plus text)", len(branches), len(tools)+1)
+	wantLen := len(tools) + 2 // one per tool, text, and array
+	if len(branches) != wantLen {
+		t.Errorf("oneOf len = %d, want %d (one per tool, text, and array)", len(branches), wantLen)
 	}
 
 	assertToolBranch(t, schema, "file_read", objectProps)
 	assertToolBranch(t, schema, "task_done", emptyObject)
 	assertToolBranch(t, schema, "code_search", nested)
-	assertToolBranch(t, schema, "noop", nil)
+	gotNoop := toolArguments(t, schema, "noop")
+	if !reflect.DeepEqual(gotNoop, map[string]any{"type": "object"}) {
+		t.Errorf("noop arguments = %#v, want {type: object} for nil Parameters", gotNoop)
+	}
 	assertTextBranch(t, schema)
 }
 
@@ -96,6 +99,98 @@ func TestSchemaForTools_ParametersPassedThroughUnmodified(t *testing.T) {
 	params["x-marker"] = "yes"
 	if got["x-marker"] != "yes" {
 		t.Fatal("mutating Parameters after schemaForTools did not affect the branch; Parameters was copied")
+	}
+}
+
+func TestSchemaForTools_NilParametersNotNull(t *testing.T) {
+	schema := schemaForTools([]ToolDef{{Type: "function", Function: FunctionDef{Name: "noop"}}})
+	raw, err := json.Marshal(schema)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	if bytes.Contains(raw, []byte(`"arguments":null`)) {
+		t.Fatalf("schema serialized arguments as null; want an object schema: %s", raw)
+	}
+	got := toolArguments(t, schema, "noop")
+	if !reflect.DeepEqual(got, map[string]any{"type": "object"}) {
+		t.Errorf("nil Parameters arguments = %#v, want {type: object}", got)
+	}
+}
+
+func TestSchemaForTools_BranchesForbidAdditionalProperties(t *testing.T) {
+	schema := schemaForTools([]ToolDef{
+		{Type: "function", Function: FunctionDef{Name: "file_read", Parameters: map[string]any{"type": "object"}}},
+	})
+	for i, branch := range oneOfBranches(t, schema) {
+		if branch["type"] == "array" {
+			items, _ := branch["items"].(map[string]any)
+			for j, item := range oneOfBranches(t, items) {
+				if item["additionalProperties"] != false {
+					t.Errorf("array items.oneOf[%d] additionalProperties = %v, want false", j, item["additionalProperties"])
+				}
+			}
+			continue
+		}
+		if branch["additionalProperties"] != false {
+			t.Errorf("oneOf[%d] additionalProperties = %v, want false", i, branch["additionalProperties"])
+		}
+	}
+}
+
+func TestSchemaAndResponse_MultiToolCallUniqueIDs(t *testing.T) {
+	tools := []ToolDef{
+		{Type: "function", Function: FunctionDef{Name: "file_read", Parameters: map[string]any{"type": "object"}}},
+		{Type: "function", Function: FunctionDef{Name: "file_find", Parameters: map[string]any{"type": "object"}}},
+	}
+	schema := schemaForTools(tools)
+	if arr, ok := findArrayBranch(schema); !ok {
+		t.Error("schema missing array oneOf branch for multiple tool calls")
+	} else {
+		if arr["minItems"] != 1 {
+			t.Errorf("array minItems = %v, want 1", arr["minItems"])
+		}
+		items, ok := arr["items"].(map[string]any)
+		if !ok {
+			t.Errorf("array items is %T, want map[string]any", arr["items"])
+		} else {
+			itemBranches := oneOfBranches(t, items)
+			gotNames := map[string]bool{}
+			for _, branch := range itemBranches {
+				props, _ := branch["properties"].(map[string]any)
+				tool, _ := props["tool"].(map[string]any)
+				name, _ := tool["const"].(string)
+				gotNames[name] = true
+			}
+			if !gotNames["file_read"] || !gotNames["file_find"] {
+				t.Errorf("array items.oneOf tools = %v, want file_read and file_find", gotNames)
+			}
+		}
+	}
+
+	raw := []byte(`[
+		{"tool":"file_read","arguments":{"path":"a.go"}},
+		{"tool":"file_find","arguments":{"glob":"*.go"}}
+	]`)
+	resp, err := responseToChat(raw, "host-model")
+	if err != nil {
+		t.Fatalf("responseToChat: %v", err)
+	}
+	assertOneChoice(t, resp)
+	calls := resp.Choices[0].Message.ToolCalls
+	if len(calls) != 2 {
+		t.Fatalf("ToolCalls len = %d, want 2", len(calls))
+	}
+	if calls[0].Function.Name != "file_read" || calls[1].Function.Name != "file_find" {
+		t.Errorf("names = %q, %q", calls[0].Function.Name, calls[1].Function.Name)
+	}
+	if calls[0].ID == "" || calls[1].ID == "" {
+		t.Fatalf("IDs must be non-empty, got %q and %q", calls[0].ID, calls[1].ID)
+	}
+	if calls[0].ID == calls[1].ID {
+		t.Fatalf("duplicate ToolCall.ID %q", calls[0].ID)
+	}
+	if calls[0].Type != "function" || calls[1].Type != "function" {
+		t.Errorf("types = %q, %q, want function", calls[0].Type, calls[1].Type)
 	}
 }
 
@@ -157,34 +252,6 @@ func TestResponseToChat_TextBranchZeroToolCallsNonNilContent(t *testing.T) {
 	}
 }
 
-func TestResponseToChat_MultiToolCallUniqueIDs(t *testing.T) {
-	raw := []byte(`[
-		{"tool":"file_read","arguments":{"path":"a.go"}},
-		{"tool":"file_find","arguments":{"glob":"*.go"}}
-	]`)
-	resp, err := responseToChat(raw, "host-model")
-	if err != nil {
-		t.Fatalf("responseToChat: %v", err)
-	}
-	assertOneChoice(t, resp)
-	calls := resp.Choices[0].Message.ToolCalls
-	if len(calls) != 2 {
-		t.Fatalf("ToolCalls len = %d, want 2", len(calls))
-	}
-	if calls[0].Function.Name != "file_read" || calls[1].Function.Name != "file_find" {
-		t.Errorf("names = %q, %q", calls[0].Function.Name, calls[1].Function.Name)
-	}
-	if calls[0].ID == "" || calls[1].ID == "" {
-		t.Fatalf("IDs must be non-empty, got %q and %q", calls[0].ID, calls[1].ID)
-	}
-	if calls[0].ID == calls[1].ID {
-		t.Fatalf("duplicate ToolCall.ID %q", calls[0].ID)
-	}
-	if calls[0].Type != "function" || calls[1].Type != "function" {
-		t.Errorf("types = %q, %q, want function", calls[0].Type, calls[1].Type)
-	}
-}
-
 func TestResponseToChat_MalformedJSONErrorNotEmptyChoices(t *testing.T) {
 	resp, err := responseToChat([]byte(`{not json`), "host-model")
 	if err == nil {
@@ -208,9 +275,9 @@ func TestResponseToChat_UnrecognizedObjectError(t *testing.T) {
 	}
 }
 
-func TestClient_CompletionsMapsToolCall(t *testing.T) {
+func TestHostAgentClient_CompletionsMapsToolCall(t *testing.T) {
 	ft := &fakeTransport{raw: []byte(`{"tool":"file_read","arguments":{"path":"x.go"}}`)}
-	c := NewClient(ft)
+	c := NewHostAgentClient(ft)
 	resp, err := c.CompletionsWithCtx(context.Background(), ChatRequest{
 		Model: "opus",
 		Messages: []Message{
@@ -239,9 +306,9 @@ func TestClient_CompletionsMapsToolCall(t *testing.T) {
 	}
 }
 
-func TestClient_CompletionsMapsText(t *testing.T) {
+func TestHostAgentClient_CompletionsMapsText(t *testing.T) {
 	ft := &fakeTransport{raw: []byte(`{"text":"done"}`)}
-	c := NewClient(ft)
+	c := NewHostAgentClient(ft)
 	resp, err := c.CompletionsWithCtx(context.Background(), ChatRequest{
 		Model:    "opus",
 		Messages: []Message{{Role: "user", Content: "summarize"}},
@@ -259,9 +326,9 @@ func TestClient_CompletionsMapsText(t *testing.T) {
 	}
 }
 
-func TestClient_CompletionsMalformedJSON(t *testing.T) {
+func TestHostAgentClient_CompletionsMalformedJSON(t *testing.T) {
 	ft := &fakeTransport{raw: []byte(`{`)}
-	c := NewClient(ft)
+	c := NewHostAgentClient(ft)
 	resp, err := c.CompletionsWithCtx(context.Background(), ChatRequest{
 		Model:    "opus",
 		Messages: []Message{{Role: "user", Content: "hi"}},
@@ -274,9 +341,9 @@ func TestClient_CompletionsMalformedJSON(t *testing.T) {
 	}
 }
 
-func TestClient_TransportError(t *testing.T) {
+func TestHostAgentClient_TransportError(t *testing.T) {
 	ft := &fakeTransport{err: errors.New("cli failed")}
-	c := NewClient(ft)
+	c := NewHostAgentClient(ft)
 	_, err := c.CompletionsWithCtx(context.Background(), ChatRequest{
 		Model:    "opus",
 		Messages: []Message{{Role: "user", Content: "hi"}},
@@ -289,10 +356,10 @@ func TestClient_TransportError(t *testing.T) {
 	}
 }
 
-func TestClient_PassesUsageThrough(t *testing.T) {
+func TestHostAgentClient_PassesUsageThrough(t *testing.T) {
 	usage := &UsageInfo{PromptTokens: 11, CompletionTokens: 7, TotalTokens: 18, CacheReadTokens: 3}
 	ft := &fakeTransport{raw: []byte(`{"text":"ok"}`), usage: usage}
-	c := NewClient(ft)
+	c := NewHostAgentClient(ft)
 	resp, err := c.CompletionsWithCtx(context.Background(), ChatRequest{
 		Model:    "opus",
 		Messages: []Message{{Role: "user", Content: "hi"}},
@@ -305,11 +372,11 @@ func TestClient_PassesUsageThrough(t *testing.T) {
 	}
 }
 
-func TestClient_ForwardsSchemaAndPrompt(t *testing.T) {
+func TestHostAgentClient_ForwardsSchemaAndPrompt(t *testing.T) {
 	params := map[string]any{"type": "object"}
 	tools := []ToolDef{{Type: "function", Function: FunctionDef{Name: "file_read", Parameters: params}}}
 	ft := &fakeTransport{raw: []byte(`{"text":"ok"}`)}
-	c := NewClient(ft)
+	c := NewHostAgentClient(ft)
 	_, err := c.CompletionsWithCtx(context.Background(), ChatRequest{
 		Model:    "opus",
 		Messages: []Message{{Role: "user", Content: "review the diff"}},
@@ -318,12 +385,48 @@ func TestClient_ForwardsSchemaAndPrompt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CompletionsWithCtx: %v", err)
 	}
-	if !strings.Contains(ft.prompt, "review the diff") {
-		t.Errorf("prompt %q does not contain the user message", ft.prompt)
+	if !strings.Contains(ft.got.Prompt, "review the diff") {
+		t.Errorf("prompt %q does not contain the user message", ft.got.Prompt)
 	}
 	want := schemaForTools(tools)
-	if !reflect.DeepEqual(ft.schema, want) {
-		t.Errorf("transport schema = %#v, want %#v", ft.schema, want)
+	if !reflect.DeepEqual(ft.got.Schema, want) {
+		t.Errorf("transport schema = %#v, want %#v", ft.got.Schema, want)
+	}
+}
+
+func TestHostAgentClient_ForwardsSessionMaxTokensSystemAndModel(t *testing.T) {
+	ft := &fakeTransport{raw: []byte(`{"text":"ok"}`)}
+	c := NewHostAgentClient(ft)
+	_, err := c.CompletionsWithCtx(context.Background(), ChatRequest{
+		Model:     "opus",
+		MaxTokens: 4096,
+		SessionID: "sess-1",
+		Messages: []Message{
+			{Role: "system", Content: "You are a reviewer."},
+			{Role: "system", Content: "Be concise."},
+			{Role: "user", Content: "review the diff"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CompletionsWithCtx: %v", err)
+	}
+	if ft.got.SessionID != "sess-1" {
+		t.Errorf("SessionID = %q, want sess-1", ft.got.SessionID)
+	}
+	if ft.got.MaxTokens != 4096 {
+		t.Errorf("MaxTokens = %d, want 4096", ft.got.MaxTokens)
+	}
+	if ft.got.Model != "opus" {
+		t.Errorf("Model = %q, want opus", ft.got.Model)
+	}
+	if !strings.Contains(ft.got.System, "You are a reviewer.") || !strings.Contains(ft.got.System, "Be concise.") {
+		t.Errorf("System = %q, want both system messages", ft.got.System)
+	}
+	if strings.Contains(ft.got.Prompt, "You are a reviewer.") || strings.Contains(ft.got.Prompt, "Be concise.") {
+		t.Errorf("Prompt %q still contains system text; system messages must be split out", ft.got.Prompt)
+	}
+	if !strings.Contains(ft.got.Prompt, "review the diff") {
+		t.Errorf("Prompt %q does not contain the user message", ft.got.Prompt)
 	}
 }
 
@@ -362,6 +465,30 @@ func oneOfBranches(t *testing.T, schema map[string]any) []map[string]any {
 	}
 }
 
+func findArrayBranch(schema map[string]any) (map[string]any, bool) {
+	raw, ok := schema["oneOf"]
+	if !ok {
+		return nil, false
+	}
+	var branches []map[string]any
+	switch items := raw.(type) {
+	case []any:
+		for _, item := range items {
+			if m, ok := item.(map[string]any); ok {
+				branches = append(branches, m)
+			}
+		}
+	case []map[string]any:
+		branches = items
+	}
+	for _, branch := range branches {
+		if branch["type"] == "array" {
+			return branch, true
+		}
+	}
+	return nil, false
+}
+
 func assertToolBranch(t *testing.T, schema map[string]any, name string, wantParams map[string]any) {
 	t.Helper()
 	for _, branch := range oneOfBranches(t, schema) {
@@ -374,12 +501,6 @@ func assertToolBranch(t *testing.T, schema map[string]any, name string, wantPara
 			continue
 		}
 		args, _ := props["arguments"].(map[string]any)
-		if wantParams == nil {
-			if props["arguments"] != nil {
-				t.Errorf("tool %q arguments = %#v, want nil Parameters passthrough", name, props["arguments"])
-			}
-			return
-		}
 		if !sameMap(args, wantParams) {
 			t.Errorf("tool %q arguments were not passed through unmodified", name)
 		}
