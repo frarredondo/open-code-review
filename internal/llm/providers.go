@@ -15,6 +15,7 @@ import (
 //   - ProtocolOpenAIChatCompletions ("openai")
 //   - ProtocolOpenAIResponses ("openai-responses")
 //   - ProtocolAnthropicBedrock ("anthropic-bedrock")
+//   - ProtocolHostAgent ("host-agent")
 //
 // To add a built-in provider that speaks a different protocol, set Protocol
 // accordingly and ensure NewLLMClient has a matching case.
@@ -78,6 +79,19 @@ var registry = []Provider{
 			"global.anthropic.claude-opus-5",
 			"global.anthropic.claude-sonnet-5",
 			"global.anthropic.claude-opus-4-8",
+		},
+	},
+	{
+		// Host-agent takes no api_key and no base URL: the harness is a local
+		// CLI whose credentials live outside OCR. Selected with --agent <name>
+		// against a host_agents.<name> entry, not --provider.
+		Name:        "host-agent",
+		DisplayName: "Host Agent (local CLI)",
+		Protocol:    ProtocolHostAgent,
+		AmbientAuth: true,
+		Models: []string{
+			"claude-opus-4-6",
+			"claude-sonnet-4-6",
 		},
 	},
 	{
