@@ -44,13 +44,16 @@ func newCLITransport(command string, extraArgs []string) *cliTransport {
 }
 
 func (t *cliTransport) Complete(ctx context.Context, req HostAgentRequest) ([]byte, *UsageInfo, error) {
-	schemaPath, err := writeHostAgentSchemaFile(req.Schema)
-	if err != nil {
-		return nil, nil, err
+	schema := req.Schema
+	if schema == nil {
+		schema = map[string]any{}
 	}
-	defer os.Remove(schemaPath)
+	schemaJSON, err := json.Marshal(schema)
+	if err != nil {
+		return nil, nil, fmt.Errorf("host-agent CLI schema: %w", err)
+	}
 
-	args := t.buildArgs(req, schemaPath)
+	args := t.buildArgs(req, string(schemaJSON))
 	// Unlike MCP's NewClient, this subprocess is one-shot: ctx bounds the
 	// whole run so cancel kills the CLI. WaitDelay then unblocks Wait if a
 	// pipe-holding grandchild outlives the kill.
@@ -88,7 +91,7 @@ func (t *cliTransport) Complete(ctx context.Context, req HostAgentRequest) ([]by
 	return append([]byte(nil), raw...), usageFromCLI(parsed.Usage), nil
 }
 
-func (t *cliTransport) buildArgs(req HostAgentRequest, schemaPath string) []string {
+func (t *cliTransport) buildArgs(req HostAgentRequest, schemaJSON string) []string {
 	// req.MaxTokens has no CLI equivalent: `claude --help` on v2.1.274 lists
 	// no --max-tokens flag. The cap is advisory for this transport;
 	// enforcement lives in the aggregate token budget instead.
@@ -97,7 +100,9 @@ func (t *cliTransport) buildArgs(req HostAgentRequest, schemaPath string) []stri
 	args = append(args,
 		"--bare", "-p",
 		"--output-format", "json",
-		"--json-schema", schemaPath,
+		// --json-schema takes an inline JSON Schema string, not a path
+		// (`claude --help` on v2.1.274: `--json-schema <schema>`).
+		"--json-schema", schemaJSON,
 		"--tools", "",
 	)
 	if req.Model != "" {
@@ -128,28 +133,6 @@ func (t *cliTransport) sessionFlag(id string) string {
 	}
 	t.started[id] = struct{}{}
 	return "--session-id"
-}
-
-func writeHostAgentSchemaFile(schema map[string]any) (string, error) {
-	if schema == nil {
-		schema = map[string]any{}
-	}
-	f, err := os.CreateTemp("", "ocr-hostagent-schema-*.json")
-	if err != nil {
-		return "", fmt.Errorf("host-agent CLI schema temp file: %w", err)
-	}
-	path := f.Name()
-	enc := json.NewEncoder(f)
-	if err := enc.Encode(schema); err != nil {
-		f.Close()
-		os.Remove(path)
-		return "", fmt.Errorf("host-agent CLI schema temp file: %w", err)
-	}
-	if err := f.Close(); err != nil {
-		os.Remove(path)
-		return "", fmt.Errorf("host-agent CLI schema temp file: %w", err)
-	}
-	return path, nil
 }
 
 // hostAgentCLIResult is a permissive decode of --output-format json.
