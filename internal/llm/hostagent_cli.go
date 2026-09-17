@@ -88,6 +88,12 @@ func (t *cliTransport) Complete(ctx context.Context, req HostAgentRequest) ([]by
 	}
 
 	parsed, parseErr := parseHostAgentCLIStdout(stdout.buf.Bytes())
+	if req.SessionID != "" && parseErr == nil && (parsed.SessionID != "" || hostAgentCLISucceeded(runErr, parsed)) {
+		// The harness created a session if it returned a parseable result
+		// with session_id, including is_error. Full success still counts
+		// even when session_id is omitted (the previous success-path mark).
+		t.markSessionStarted(req.SessionID)
+	}
 	if parseErr == nil && parsed.IsError {
 		return nil, nil, fmt.Errorf("%s", parsed.errorMessage())
 	}
@@ -100,9 +106,6 @@ func (t *cliTransport) Complete(ctx context.Context, req HostAgentRequest) ([]by
 	raw := parsed.StructuredOutput
 	if len(bytes.TrimSpace(raw)) == 0 || string(raw) == "null" {
 		return nil, nil, fmt.Errorf("host-agent CLI success response missing structured_output")
-	}
-	if req.SessionID != "" {
-		t.markSessionStarted(req.SessionID)
 	}
 	return append([]byte(nil), raw...), usageFromCLI(parsed.Usage), nil
 }
@@ -141,6 +144,12 @@ func (t *cliTransport) buildArgs(req HostAgentRequest, schemaJSON string) []stri
 }
 
 // sessionFlagFor is read-only: it does not record the id as started.
+// Concurrent first calls for the same unstarted id do not both observe
+// this and emit --session-id: claimSessionTurn holds a per-id inflight
+// slot so the second waits, then either --resume (first created a
+// session) or --session-id (first produced no usable response). That
+// wait is acceptable because duplicate --session-id against a live
+// harness is not known-safe, and group subtasks mint distinct ids.
 func (t *cliTransport) sessionFlagFor(id string) string {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -150,6 +159,11 @@ func (t *cliTransport) sessionFlagFor(id string) string {
 	return "--session-id"
 }
 
+// markSessionStarted records that the harness holds a session for id.
+// Call after a parseable CLI result that either carries session_id or
+// is a full success. The set is keyed by OCR's id because --session-id
+// already binds that UUID; a differing returned session_id would mean
+// the flag was ignored, which is a separate bug.
 func (t *cliTransport) markSessionStarted(id string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -190,6 +204,14 @@ func (t *cliTransport) releaseSessionTurn(id string) {
 	defer t.mu.Unlock()
 	delete(t.inflight, id)
 	t.cond.Broadcast()
+}
+
+func hostAgentCLISucceeded(runErr error, parsed hostAgentCLIResult) bool {
+	if runErr != nil || parsed.IsError {
+		return false
+	}
+	raw := parsed.StructuredOutput
+	return len(bytes.TrimSpace(raw)) > 0 && string(raw) != "null"
 }
 
 // hostAgentCLIResult is a permissive decode of --output-format json.
