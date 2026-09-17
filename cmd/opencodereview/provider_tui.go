@@ -56,7 +56,9 @@ const (
 // cpProtocols lists the protocol options offered in the Custom provider form.
 // Using the canonical names from protocol.go means whatever the user picks
 // flows through resolver normalization unchanged and is written to config
-// verbatim.
+// verbatim. host-agent is omitted: it is selected with --agent against
+// host_agents, not as a custom provider, and has no URL, token, or region
+// to collect.
 var cpProtocols = []string{
 	llm.ProtocolAnthropic,
 	llm.ProtocolOpenAIChatCompletions,
@@ -65,9 +67,9 @@ var cpProtocols = []string{
 }
 
 // manualProtocols lists the protocol options offered in the Manual form, which
-// writes llm.url and llm.auth_token. Bedrock is deliberately absent: that block
-// holds no region or profile, and bedrock uses neither the url nor the token it
-// does hold, so the resolver rejects the combination outright.
+// writes llm.url and llm.auth_token. Bedrock and host-agent are deliberately
+// absent: both use neither the url nor the token that block holds, so the
+// resolver rejects those combinations outright.
 var manualProtocols = []string{
 	llm.ProtocolAnthropic,
 	llm.ProtocolOpenAIChatCompletions,
