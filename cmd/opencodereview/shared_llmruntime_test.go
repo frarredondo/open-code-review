@@ -4,6 +4,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -51,6 +52,42 @@ func TestLoadLLMRuntime_Success(t *testing.T) {
 	}
 	if rt.RuntimeConfig.EndpointHost != "api.example.test" {
 		t.Errorf("endpoint host = %q, want api.example.test", rt.RuntimeConfig.EndpointHost)
+	}
+}
+
+func TestLoadLLMRuntime_Agent(t *testing.T) {
+	home := t.TempDir()
+	setTestHome(t, home)
+	cfgDir := filepath.Join(home, ".opencodereview")
+	if err := os.MkdirAll(cfgDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	cfg := &Config{
+		Model: "claude-opus-4-6",
+		HostAgents: map[string]HostAgentConfig{
+			"claude": {Command: "claude", Args: []string{"--foo"}, Env: []string{"FOO=bar"}},
+		},
+	}
+	if err := saveConfig(filepath.Join(cfgDir, "config.json"), cfg); err != nil {
+		t.Fatalf("saveConfig: %v", err)
+	}
+
+	tpl := loadTestTemplate(t)
+	rt, err := loadLLMRuntime(tpl, "", llm.ResolveOptions{Agent: "claude"})
+	if err != nil {
+		t.Fatalf("loadLLMRuntime: %v", err)
+	}
+	if got := fmt.Sprintf("%T", rt.Client); got != "*llm.HostAgentClient" {
+		t.Errorf("Client = %s, want *llm.HostAgentClient", got)
+	}
+	if rt.Model != "claude-opus-4-6" {
+		t.Errorf("model = %q, want claude-opus-4-6", rt.Model)
+	}
+	if rt.Provider != "claude" {
+		t.Errorf("provider = %q, want claude (the agent name)", rt.Provider)
+	}
+	if rt.RuntimeConfig.Protocol != llm.ProtocolHostAgent {
+		t.Errorf("protocol = %q, want %q", rt.RuntimeConfig.Protocol, llm.ProtocolHostAgent)
 	}
 }
 

@@ -42,6 +42,7 @@ type reviewOptions struct {
 	backgroundFile        string
 	provider              string
 	model                 string
+	agent                 string
 	concurrency           int
 	concurrentTaskTimeout int
 	maxTools              int

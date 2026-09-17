@@ -47,6 +47,7 @@ type scanOptions struct {
 	maxTokensBudget       int
 	provider              string
 	model                 string
+	agent                 string
 	resume                string
 }
 

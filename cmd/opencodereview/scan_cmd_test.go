@@ -201,6 +201,26 @@ func TestParseScanFlags_ProviderAndModelOverrides(t *testing.T) {
 	}
 }
 
+func TestParseScanFlags_Agent(t *testing.T) {
+	opts, err := parseScanFlags([]string{"--agent", "claude", "--model", "claude-opus-4-6"})
+	if err != nil {
+		t.Fatalf("parseScanFlags: %v", err)
+	}
+	if opts.agent != "claude" {
+		t.Errorf("agent = %q, want claude", opts.agent)
+	}
+}
+
+func TestParseScanFlags_AgentAndProviderRejected(t *testing.T) {
+	_, err := parseScanFlags([]string{"--agent", "claude", "--provider", "openai"})
+	if err == nil {
+		t.Fatal("expected error when --agent and --provider are both set")
+	}
+	if !strings.Contains(err.Error(), "--agent") || !strings.Contains(err.Error(), "--provider") {
+		t.Errorf("error = %q, want it to mention --agent and --provider", err)
+	}
+}
+
 func TestParseScanFlags_Resume(t *testing.T) {
 	opts, err := parseScanFlags([]string{"--resume", "session-123"})
 	if err != nil {
