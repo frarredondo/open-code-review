@@ -2781,6 +2781,16 @@ func TestCpProtocols_ContainsAllCanonicalNames(t *testing.T) {
 		}
 	}
 
+	inCustom := make(map[string]bool, len(cpProtocols))
+	for _, p := range cpProtocols {
+		inCustom[p] = true
+	}
+	for _, p := range canonicalProtocolsListedByValidate(t) {
+		if !inCustom[p] {
+			t.Errorf("cpProtocols missing canonical protocol %q", p)
+		}
+	}
+
 	wantManual := want[:len(want)-1]
 	if len(manualProtocols) != len(wantManual) {
 		t.Fatalf("manualProtocols has %d entries, want %d", len(manualProtocols), len(wantManual))
@@ -2795,6 +2805,28 @@ func TestCpProtocols_ContainsAllCanonicalNames(t *testing.T) {
 			t.Error("manualProtocols offers bedrock; the llm block has no region, profile or use for its url and token")
 		}
 	}
+}
+
+func canonicalProtocolsListedByValidate(t *testing.T) []string {
+	t.Helper()
+	err := llm.ValidateProtocol("not-a-protocol")
+	if err == nil {
+		t.Fatal("ValidateProtocol accepted an unknown name")
+	}
+	const marker = "supported protocols are "
+	msg := err.Error()
+	idx := strings.Index(msg, marker)
+	if idx < 0 {
+		t.Fatalf("ValidateProtocol error %q does not list supported protocols", msg)
+	}
+	var out []string
+	for _, part := range strings.Split(msg[idx+len(marker):], ", ") {
+		out = append(out, strings.Trim(part, `"`))
+	}
+	if len(out) == 0 {
+		t.Fatal("parsed zero protocols from ValidateProtocol")
+	}
+	return out
 }
 
 func TestCpProtocolIndex(t *testing.T) {
