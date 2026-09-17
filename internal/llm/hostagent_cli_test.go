@@ -240,6 +240,18 @@ func TestCLITransport_ArgvResumeSystemPromptAndTools(t *testing.T) {
 		assertFlagValue(t, args, "--system-prompt", "You are a reviewer.")
 		assertFlagValue(t, args, "--tools", "")
 	})
+	t.Run("model omitted when empty", func(t *testing.T) {
+		tr, argvFile, _ := newTestCLI(t, "happy")
+		req := sampleHostAgentRequest()
+		req.Model = ""
+		if _, _, err := tr.Complete(context.Background(), req); err != nil {
+			t.Fatalf("Complete: %v", err)
+		}
+		args := readArgv(t, argvFile)
+		if hasFlag(args, "--model") {
+			t.Errorf("argv %v has --model with empty Model", args)
+		}
+	})
 }
 
 func sampleHostAgentRequest() HostAgentRequest {
