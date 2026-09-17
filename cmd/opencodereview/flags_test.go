@@ -51,6 +51,29 @@ func TestParseReviewFlagsProviderAndModelOverrides(t *testing.T) {
 	}
 }
 
+func TestParseReviewFlagsAgent(t *testing.T) {
+	opts, err := parseReviewFlags([]string{"--agent", "claude", "--model", "claude-opus-4-6"})
+	if err != nil {
+		t.Fatalf("parseReviewFlags: %v", err)
+	}
+	if opts.agent != "claude" {
+		t.Errorf("agent = %q, want claude", opts.agent)
+	}
+	if opts.model != "claude-opus-4-6" {
+		t.Errorf("model = %q, want claude-opus-4-6", opts.model)
+	}
+}
+
+func TestParseReviewFlagsAgentAndProviderRejected(t *testing.T) {
+	_, err := parseReviewFlags([]string{"--agent", "claude", "--provider", "anthropic"})
+	if err == nil {
+		t.Fatal("expected error when --agent and --provider are both set")
+	}
+	if !strings.Contains(err.Error(), "--agent") || !strings.Contains(err.Error(), "--provider") {
+		t.Errorf("error = %q, want it to mention --agent and --provider", err)
+	}
+}
+
 func TestParseReviewFlagsResume(t *testing.T) {
 	opts, err := parseReviewFlags([]string{"--from", "main", "--to", "feature", "--resume", "session-123"})
 	if err != nil {

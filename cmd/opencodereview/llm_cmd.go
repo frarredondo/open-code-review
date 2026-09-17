@@ -45,12 +45,20 @@ var llmProvidersCmd = &cobra.Command{
 	},
 }
 
+var llmTestAgent string
+
 func init() {
 	llmCmd.AddCommand(llmTestCmd)
 	llmCmd.AddCommand(llmProvidersCmd)
+	addAgentFlag(llmTestCmd, &llmTestAgent)
 }
 
 func runLLMTest() error {
+	ep, err := resolveLLMTestEndpoint()
+	if err != nil {
+		return err
+	}
+
 	cfgPath, err := resolveConfigPath()
 	if err != nil {
 		return err
@@ -59,11 +67,6 @@ func runLLMTest() error {
 	appCfg, err := LoadAppConfig(cfgPath)
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
-	}
-
-	ep, err := llm.ResolveEndpoint(cfgPath)
-	if err != nil {
-		return fmt.Errorf("resolve LLM endpoint: %w", err)
 	}
 
 	task, err := testconnection.LoadDefault()
@@ -130,6 +133,20 @@ func runLLMTest() error {
 	fmt.Printf("%s\n", content)
 	fmt.Println("✓ Connection test successful")
 	return nil
+}
+
+func resolveLLMTestEndpoint() (llm.ResolvedEndpoint, error) {
+	cfgPath, err := resolveConfigPath()
+	if err != nil {
+		return llm.ResolvedEndpoint{}, err
+	}
+	ep, err := llm.ResolveEndpointWithOptions(cfgPath, llm.ResolveOptions{
+		Agent: llmTestAgent,
+	})
+	if err != nil {
+		return llm.ResolvedEndpoint{}, fmt.Errorf("resolve LLM endpoint: %w", err)
+	}
+	return ep, nil
 }
 
 // bedrockContext reports the region and profile a Bedrock client resolved.

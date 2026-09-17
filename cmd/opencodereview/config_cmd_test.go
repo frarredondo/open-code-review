@@ -932,6 +932,196 @@ func TestSetConfigValueMCPServer(t *testing.T) {
 	}
 }
 
+func TestSetConfigValueHostAgentCommand(t *testing.T) {
+	cfg := &Config{}
+	if err := setConfigValue(cfg, "host_agents.claude.command", "claude"); err != nil {
+		t.Fatalf("setConfigValue: %v", err)
+	}
+	if cfg.HostAgents["claude"].Command != "claude" {
+		t.Errorf("Command = %q, want claude", cfg.HostAgents["claude"].Command)
+	}
+}
+
+func TestSetConfigValueHostAgentCommandEmpty(t *testing.T) {
+	cfg := &Config{}
+	err := setConfigValue(cfg, "host_agents.claude.command", "")
+	if err == nil {
+		t.Fatal("expected error for empty command")
+	}
+	if !strings.Contains(err.Error(), "command cannot be empty") {
+		t.Errorf("error = %q, want command cannot be empty", err)
+	}
+}
+
+func TestSetConfigValueHostAgentArgs(t *testing.T) {
+	cfg := &Config{}
+	if err := setConfigValue(cfg, "host_agents.claude.args", `["--foo","--bar"]`); err != nil {
+		t.Fatalf("setConfigValue: %v", err)
+	}
+	args := cfg.HostAgents["claude"].Args
+	if len(args) != 2 || args[0] != "--foo" || args[1] != "--bar" {
+		t.Errorf("Args = %v, want [--foo --bar]", args)
+	}
+}
+
+func TestSetConfigValueHostAgentArgsInvalidJSON(t *testing.T) {
+	cfg := &Config{}
+	err := setConfigValue(cfg, "host_agents.claude.args", "not-json")
+	if err == nil {
+		t.Fatal("expected error for invalid JSON")
+	}
+	if !strings.Contains(err.Error(), "invalid JSON array") {
+		t.Errorf("error = %q, want invalid JSON array", err)
+	}
+}
+
+func TestSetConfigValueHostAgentEnv(t *testing.T) {
+	cfg := &Config{}
+	if err := setConfigValue(cfg, "host_agents.claude.env", `["FOO=bar","BAZ=qux"]`); err != nil {
+		t.Fatalf("setConfigValue: %v", err)
+	}
+	env := cfg.HostAgents["claude"].Env
+	if len(env) != 2 || env[0] != "FOO=bar" || env[1] != "BAZ=qux" {
+		t.Errorf("Env = %v, want [FOO=bar BAZ=qux]", env)
+	}
+}
+
+func TestSetConfigValueHostAgentEnvInvalid(t *testing.T) {
+	cfg := &Config{}
+	err := setConfigValue(cfg, "host_agents.claude.env", `["NOEQUALS"]`)
+	if err == nil {
+		t.Fatal("expected error for env entry without KEY=VALUE")
+	}
+	if !strings.Contains(err.Error(), "KEY=VALUE") {
+		t.Errorf("error = %q, want KEY=VALUE", err)
+	}
+}
+
+func TestSetConfigValueHostAgentUnknownField(t *testing.T) {
+	cfg := &Config{}
+	err := setConfigValue(cfg, "host_agents.claude.unknown", "val")
+	if err == nil {
+		t.Fatal("expected error for unknown host-agent field")
+	}
+	if !strings.Contains(err.Error(), "unknown host-agent field") {
+		t.Errorf("error = %q, want unknown host-agent field", err)
+	}
+}
+
+func TestSetConfigValueHostAgentInvalidKey(t *testing.T) {
+	cfg := &Config{}
+	for _, key := range []string{"host_agents", "host_agents.", "host_agents..command", "host_agents.name"} {
+		err := setHostAgentValue(cfg, key, "val")
+		if err == nil {
+			t.Errorf("expected error for invalid key %q", key)
+			continue
+		}
+		if !strings.Contains(err.Error(), "invalid host-agent key") {
+			t.Errorf("key %q error = %q, want invalid host-agent key", key, err)
+		}
+	}
+}
+
+func TestSetConfigValueUnknownKeyListsHostAgents(t *testing.T) {
+	err := setConfigValue(&Config{}, "bogus.key", "val")
+	if err == nil {
+		t.Fatal("expected error for unknown key")
+	}
+	if !strings.Contains(err.Error(), "host_agents.<name>.<field>") {
+		t.Errorf("unknown-key message should list host_agents: %q", err)
+	}
+	if !strings.Contains(err.Error(), "host-agent") {
+		t.Errorf("unknown-key message should list host-agent protocol: %q", err)
+	}
+}
+
+func TestUnsetHostAgent(t *testing.T) {
+	dir := t.TempDir()
+	configPath := dir + "/config.json"
+
+	cfg := &Config{
+		HostAgents: map[string]HostAgentConfig{
+			"claude": {Command: "claude"},
+			"codex":  {Command: "codex"},
+		},
+	}
+	if err := saveConfig(configPath, cfg); err != nil {
+		t.Fatalf("saveConfig: %v", err)
+	}
+
+	if err := unsetHostAgent(configPath, "claude"); err != nil {
+		t.Fatalf("unsetHostAgent: %v", err)
+	}
+
+	cfg, err := loadOrCreateConfig(configPath)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if _, exists := cfg.HostAgents["claude"]; exists {
+		t.Error("claude should have been deleted")
+	}
+	if _, exists := cfg.HostAgents["codex"]; !exists {
+		t.Error("codex should still exist")
+	}
+}
+
+func TestUnsetHostAgent_LastEntry(t *testing.T) {
+	dir := t.TempDir()
+	configPath := dir + "/config.json"
+
+	cfg := &Config{
+		HostAgents: map[string]HostAgentConfig{
+			"only": {Command: "claude"},
+		},
+	}
+	if err := saveConfig(configPath, cfg); err != nil {
+		t.Fatalf("saveConfig: %v", err)
+	}
+
+	if err := unsetHostAgent(configPath, "only"); err != nil {
+		t.Fatalf("unsetHostAgent: %v", err)
+	}
+
+	cfg, err := loadOrCreateConfig(configPath)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if cfg.HostAgents != nil {
+		t.Errorf("HostAgents should be nil after deleting last entry, got %v", cfg.HostAgents)
+	}
+}
+
+func TestUnsetHostAgent_NotFound(t *testing.T) {
+	dir := t.TempDir()
+	configPath := dir + "/config.json"
+
+	cfg := &Config{}
+	if err := saveConfig(configPath, cfg); err != nil {
+		t.Fatalf("saveConfig: %v", err)
+	}
+
+	if err := unsetHostAgent(configPath, "nonexistent"); err == nil {
+		t.Fatal("expected error for nil HostAgents")
+	} else if !strings.Contains(err.Error(), "not found") {
+		t.Errorf("error = %q, want not found", err)
+	}
+
+	cfg = &Config{
+		HostAgents: map[string]HostAgentConfig{
+			"other": {Command: "cmd"},
+		},
+	}
+	if err := saveConfig(configPath, cfg); err != nil {
+		t.Fatalf("saveConfig: %v", err)
+	}
+
+	if err := unsetHostAgent(configPath, "nonexistent"); err == nil {
+		t.Fatal("expected error for missing agent")
+	} else if !strings.Contains(err.Error(), "not found") {
+		t.Errorf("error = %q, want not found", err)
+	}
+}
+
 func TestEnsureTelemetry(t *testing.T) {
 	cfg := &Config{}
 	if cfg.Telemetry != nil {
@@ -1138,10 +1328,11 @@ func TestSetConfigValueUnknownKeyMessage(t *testing.T) {
 		t.Fatal("expected error for unknown key")
 	}
 	want := "unknown config key: bogus.key\n" +
-		"Supported keys: provider, model, max_tokens, effort, providers.<name>.<field>, custom_providers.<name>.<field>, mcp_servers.<name>.<field>, llm.url, llm.auth_token, llm.auth_token_cmd, llm.auth_header, llm.model, llm.timeout_sec, llm.protocol, llm.use_anthropic, llm.extra_body, llm.extra_headers, llm.retry_codes, language, telemetry.enabled, telemetry.exporter, telemetry.otlp_endpoint, telemetry.content_logging\n" +
+		"Supported keys: provider, model, max_tokens, effort, providers.<name>.<field>, custom_providers.<name>.<field>, mcp_servers.<name>.<field>, host_agents.<name>.<field>, llm.url, llm.auth_token, llm.auth_token_cmd, llm.auth_header, llm.model, llm.timeout_sec, llm.protocol, llm.use_anthropic, llm.extra_body, llm.extra_headers, llm.retry_codes, language, telemetry.enabled, telemetry.exporter, telemetry.otlp_endpoint, telemetry.content_logging\n" +
 		"Provider fields: api_key, api_key_cmd, url, protocol, model, models, auth_header, timeout_sec, extra_body, extra_headers, retry_codes, aws_region, aws_profile\n" +
-		"Protocol values: anthropic, anthropic-bedrock, openai, openai-responses\n" +
-		"MCP server fields: type, command, args, env, url, headers, tools, setup"
+		"Protocol values: anthropic, anthropic-bedrock, openai, openai-responses, host-agent\n" +
+		"MCP server fields: type, command, args, env, url, headers, tools, setup\n" +
+		"Host agent fields: command, args, env"
 	if err.Error() != want {
 		t.Errorf("unknown-key message drifted:\n got: %q\nwant: %q", err.Error(), want)
 	}

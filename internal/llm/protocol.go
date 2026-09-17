@@ -35,6 +35,11 @@ const (
 	// official SDK's bedrock middleware performs that rewriting, so this
 	// shares the Anthropic client rather than reimplementing the protocol.
 	ProtocolAnthropicBedrock = "anthropic-bedrock"
+	// ProtocolHostAgent is a local CLI harness (Claude Code) spawned as a
+	// subprocess. There is no URL and no token: credentials live in the
+	// harness, the same ambient-auth shape as Bedrock. Selected with --agent
+	// rather than --provider.
+	ProtocolHostAgent = "host-agent"
 )
 
 // NormalizeProtocol canonicalizes protocol names. It is case-insensitive and
@@ -55,18 +60,20 @@ func NormalizeProtocol(raw string) string {
 		return ProtocolOpenAIResponses
 	case ProtocolAnthropicBedrock:
 		return ProtocolAnthropicBedrock
+	case ProtocolHostAgent:
+		return ProtocolHostAgent
 	default:
 		return normalized
 	}
 }
 
-// ValidateProtocol accepts the four canonical protocol names and rejects
+// ValidateProtocol accepts the canonical protocol names and rejects
 // everything else.
 func ValidateProtocol(p string) error {
 	switch p {
-	case ProtocolAnthropic, ProtocolOpenAIChatCompletions, ProtocolOpenAIResponses, ProtocolAnthropicBedrock:
+	case ProtocolAnthropic, ProtocolOpenAIChatCompletions, ProtocolOpenAIResponses, ProtocolAnthropicBedrock, ProtocolHostAgent:
 		return nil
 	default:
-		return fmt.Errorf("unsupported protocol %q; supported protocols are %q, %q, %q, %q", p, ProtocolAnthropic, ProtocolOpenAIChatCompletions, ProtocolOpenAIResponses, ProtocolAnthropicBedrock)
+		return fmt.Errorf("unsupported protocol %q; supported protocols are %q, %q, %q, %q, %q", p, ProtocolAnthropic, ProtocolOpenAIChatCompletions, ProtocolOpenAIResponses, ProtocolAnthropicBedrock, ProtocolHostAgent)
 	}
 }

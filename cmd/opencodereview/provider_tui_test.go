@@ -2761,40 +2761,85 @@ func TestApplyCustomProviderConfigNormalizesAuthHeader(t *testing.T) {
 
 // --- protocol normalization / openai-responses support ---
 
-func TestCpProtocols_ContainsAllCanonicalNames(t *testing.T) {
-	// The Custom form offers every canonical protocol, in canonical order, so
-	// result() picks up the right string for each index. The Manual form writes
-	// llm.url + llm.auth_token and so omits bedrock, which uses neither; the two
-	// lists share their prefix, which is what keeps a single index helper honest.
-	want := []string{
-		llm.ProtocolAnthropic,
-		llm.ProtocolOpenAIChatCompletions,
-		llm.ProtocolOpenAIResponses,
-		llm.ProtocolAnthropicBedrock,
+func TestProtocolPickerForms_ClassifyEveryCanonicalProtocol(t *testing.T) {
+	// Canonical names come from ValidateProtocol's error list, so a sixth
+	// protocol cannot be added there without this test requiring a decision.
+	// Each name must appear in the form or in that form's excluded set.
+	//
+	// Custom form: HTTP URL+token protocols, plus Bedrock (a custom entry
+	// still holds aws_region/aws_profile). host-agent is omitted because it
+	// is selected with --agent against host_agents and has no URL, token, or
+	// region to collect.
+	//
+	// Manual form writes llm.url + llm.auth_token. Bedrock and host-agent
+	// both use neither, so both are omitted; the resolver already rejects
+	// those combinations.
+	canonical := canonicalProtocolsListedByValidate(t)
+
+	customExcluded := map[string]string{
+		llm.ProtocolHostAgent: "selected with --agent against host_agents; no URL, token, or region",
 	}
-	if len(cpProtocols) != len(want) {
-		t.Fatalf("cpProtocols has %d entries, want %d", len(cpProtocols), len(want))
+	manualExcluded := map[string]string{
+		llm.ProtocolAnthropicBedrock: "llm block has no region or profile; bedrock uses neither url nor token",
+		llm.ProtocolHostAgent:        "selected with --agent; no URL or token",
 	}
-	for i, p := range want {
-		if cpProtocols[i] != p {
-			t.Errorf("cpProtocols[%d] = %q, want %q", i, cpProtocols[i], p)
+
+	assertFormIsCanonicalMinusExcluded(t, "cpProtocols", cpProtocols, canonical, customExcluded)
+	assertFormIsCanonicalMinusExcluded(t, "manualProtocols", manualProtocols, canonical, manualExcluded)
+}
+
+func assertFormIsCanonicalMinusExcluded(t *testing.T, name string, form, canonical []string, excluded map[string]string) {
+	t.Helper()
+	inCanonical := make(map[string]bool, len(canonical))
+	for _, p := range canonical {
+		inCanonical[p] = true
+	}
+	for p, reason := range excluded {
+		if !inCanonical[p] {
+			t.Errorf("%s excludes %q, which is not a canonical protocol", name, p)
+		}
+		if strings.TrimSpace(reason) == "" {
+			t.Errorf("%s excludes %q with an empty reason", name, p)
 		}
 	}
 
-	wantManual := want[:len(want)-1]
-	if len(manualProtocols) != len(wantManual) {
-		t.Fatalf("manualProtocols has %d entries, want %d", len(manualProtocols), len(wantManual))
+	want := make([]string, 0, len(canonical))
+	for _, p := range canonical {
+		if _, skip := excluded[p]; skip {
+			continue
+		}
+		want = append(want, p)
 	}
-	for i, p := range wantManual {
-		if manualProtocols[i] != p {
-			t.Errorf("manualProtocols[%d] = %q, want %q", i, manualProtocols[i], p)
+	if len(form) != len(want) {
+		t.Fatalf("%s has %d entries %v, want %d %v (canonical minus excluded)", name, len(form), form, len(want), want)
+	}
+	for i := range want {
+		if form[i] != want[i] {
+			t.Errorf("%s[%d] = %q, want %q", name, i, form[i], want[i])
 		}
 	}
-	for _, p := range manualProtocols {
-		if p == llm.ProtocolAnthropicBedrock {
-			t.Error("manualProtocols offers bedrock; the llm block has no region, profile or use for its url and token")
-		}
+}
+
+func canonicalProtocolsListedByValidate(t *testing.T) []string {
+	t.Helper()
+	err := llm.ValidateProtocol("not-a-protocol")
+	if err == nil {
+		t.Fatal("ValidateProtocol accepted an unknown name")
 	}
+	const marker = "supported protocols are "
+	msg := err.Error()
+	idx := strings.Index(msg, marker)
+	if idx < 0 {
+		t.Fatalf("ValidateProtocol error %q does not list supported protocols", msg)
+	}
+	var out []string
+	for _, part := range strings.Split(msg[idx+len(marker):], ", ") {
+		out = append(out, strings.Trim(part, `"`))
+	}
+	if len(out) == 0 {
+		t.Fatal("parsed zero protocols from ValidateProtocol")
+	}
+	return out
 }
 
 func TestCpProtocolIndex(t *testing.T) {

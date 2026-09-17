@@ -47,6 +47,7 @@ type scanOptions struct {
 	maxTokensBudget       int
 	provider              string
 	model                 string
+	agent                 string
 	resume                string
 }
 
@@ -169,6 +170,7 @@ func executeScan(opts scanOptions) (retErr error) {
 	rt, err := loadLLMRuntime(cc.Template, opts.toolConfigPath, llm.ResolveOptions{
 		Provider: opts.provider,
 		Model:    opts.model,
+		Agent:    opts.agent,
 	})
 	if err != nil {
 		return err

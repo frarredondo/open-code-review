@@ -55,8 +55,8 @@ var configSetCmd = &cobra.Command{
 var configUnsetCmd = &cobra.Command{
 	Use:     "unset <key>",
 	Short:   "Remove a configuration value",
-	Long:    "Remove a provider, custom_providers.<name>, or mcp_servers.<name>.",
-	Example: "  ocr config unset provider\n  ocr config unset custom_providers.my-provider\n  ocr config unset mcp_servers.github",
+	Long:    "Remove a provider, custom_providers.<name>, mcp_servers.<name>, or host_agents.<name>.",
+	Example: "  ocr config unset provider\n  ocr config unset custom_providers.my-provider\n  ocr config unset mcp_servers.github\n  ocr config unset host_agents.claude",
 	Args:    exactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runConfigUnset(args[0])
@@ -164,7 +164,7 @@ func runConfigUnset(key string) error {
 
 	parts := strings.SplitN(key, ".", 2)
 	if len(parts) != 2 || parts[1] == "" {
-		return fmt.Errorf("unset supports provider, max_tokens, effort, custom_providers.<name>, and mcp_servers.<name>")
+		return fmt.Errorf("unset supports provider, max_tokens, effort, custom_providers.<name>, mcp_servers.<name>, and host_agents.<name>")
 	}
 
 	switch parts[0] {
@@ -172,8 +172,10 @@ func runConfigUnset(key string) error {
 		return unsetCustomProvider(configPath, parts[1])
 	case "mcp_servers":
 		return unsetMCPServer(configPath, parts[1])
+	case "host_agents":
+		return unsetHostAgent(configPath, parts[1])
 	default:
-		return fmt.Errorf("unset supports provider, max_tokens, effort, custom_providers.<name>, and mcp_servers.<name>")
+		return fmt.Errorf("unset supports provider, max_tokens, effort, custom_providers.<name>, mcp_servers.<name>, and host_agents.<name>")
 	}
 }
 
@@ -285,6 +287,76 @@ func unsetMCPServer(configPath, name string) error {
 	return nil
 }
 
+func unsetHostAgent(configPath, name string) error {
+	cfg, err := loadOrCreateConfig(configPath)
+	if err != nil {
+		return fmt.Errorf("load config: %w", err)
+	}
+
+	if cfg.HostAgents == nil {
+		return fmt.Errorf("host-agent %q not found", name)
+	}
+	if _, exists := cfg.HostAgents[name]; !exists {
+		return fmt.Errorf("host-agent %q not found", name)
+	}
+
+	delete(cfg.HostAgents, name)
+	if len(cfg.HostAgents) == 0 {
+		cfg.HostAgents = nil
+	}
+
+	if err := saveConfig(configPath, cfg); err != nil {
+		return err
+	}
+
+	fmt.Printf("Deleted host-agent %q.\n", name)
+	return nil
+}
+
+func setHostAgentValue(cfg *Config, key, value string) error {
+	parts := strings.SplitN(key, ".", 3)
+	if len(parts) != 3 || parts[1] == "" || parts[2] == "" {
+		return fmt.Errorf("invalid host-agent key %q: expected host_agents.<name>.<field>", key)
+	}
+	name, field := parts[1], parts[2]
+
+	if cfg.HostAgents == nil {
+		cfg.HostAgents = make(map[string]HostAgentConfig)
+	}
+	entry := cfg.HostAgents[name]
+
+	switch field {
+	case "command":
+		if value == "" {
+			return fmt.Errorf("host-agent command cannot be empty")
+		}
+		entry.Command = value
+	case "args":
+		var args []string
+		if err := json.Unmarshal([]byte(value), &args); err != nil {
+			return fmt.Errorf("invalid JSON array for %s: %w", key, err)
+		}
+		entry.Args = args
+	case "env":
+		var env []string
+		if err := json.Unmarshal([]byte(value), &env); err != nil {
+			return fmt.Errorf("invalid JSON array for %s: %w", key, err)
+		}
+		for _, e := range env {
+			idx := strings.Index(e, "=")
+			if idx <= 0 {
+				return fmt.Errorf("invalid env entry %q: must be in KEY=VALUE format", e)
+			}
+		}
+		entry.Env = env
+	default:
+		return fmt.Errorf("unknown host-agent field %q: supported fields are command, args, env", field)
+	}
+
+	cfg.HostAgents[name] = entry
+	return nil
+}
+
 // deleteCustomProvider removes a custom provider from cfg in memory.
 // Returns true if the deleted provider was the active one.
 func deleteCustomProvider(cfg *Config, name string) (bool, error) {
@@ -347,6 +419,15 @@ type MCPServerConfig struct {
 	Setup   string            `json:"setup,omitempty"`
 }
 
+// HostAgentConfig holds configuration for a named local CLI harness.
+// Command is an executable OCR will spawn; it is read only from the user
+// config file (~/.opencodereview/config.json), never from a repository.
+type HostAgentConfig struct {
+	Command string   `json:"command,omitempty"`
+	Args    []string `json:"args,omitempty"`
+	Env     []string `json:"env,omitempty"`
+}
+
 // Config represents the user-level configuration file (~/.opencodereview/config.json).
 type Config struct {
 	Provider        string                     `json:"provider,omitempty"`
@@ -359,6 +440,7 @@ type Config struct {
 	Language        string                     `json:"language,omitempty"`
 	Telemetry       *TelemetryConfig           `json:"telemetry,omitempty"`
 	MCPServers      map[string]MCPServerConfig `json:"mcp_servers,omitempty"`
+	HostAgents      map[string]HostAgentConfig `json:"host_agents,omitempty"`
 }
 
 type LlmConfig struct {
@@ -425,6 +507,7 @@ var supportedConfigKeys = []string{
 	"providers.<name>.<field>",
 	"custom_providers.<name>.<field>",
 	"mcp_servers.<name>.<field>",
+	"host_agents.<name>.<field>",
 	"llm.url",
 	"llm.auth_token",
 	"llm.auth_token_cmd",
@@ -453,6 +536,9 @@ func setConfigValue(cfg *Config, key, value string) error {
 	}
 	if strings.HasPrefix(key, "mcp_servers.") {
 		return setMCPServerValue(cfg, key, value)
+	}
+	if strings.HasPrefix(key, "host_agents.") {
+		return setHostAgentValue(cfg, key, value)
 	}
 
 	switch key {
@@ -545,6 +631,9 @@ func setConfigValue(cfg *Config, key, value string) error {
 		if normalized == llm.ProtocolAnthropicBedrock {
 			return fmt.Errorf("llm.protocol cannot be %q: bedrock derives its host from aws_region and signs with the AWS credential chain, so it has no use for llm.url or llm.auth_token; run `ocr config set provider bedrock` instead", normalized)
 		}
+		if normalized == llm.ProtocolHostAgent {
+			return fmt.Errorf("llm.protocol cannot be %q: host-agent endpoints are configured under host_agents and selected with --agent, so they have no use for llm.url or llm.auth_token", normalized)
+		}
 		cfg.Llm.Protocol = normalized
 		// Mirror use_anthropic so older binaries that predate llm.protocol
 		// still pick the right protocol family: anthropic -> true, the OpenAI
@@ -609,7 +698,7 @@ func setConfigValue(cfg *Config, key, value string) error {
 		}
 		cfg.Llm.RetryCodes = codes
 	default:
-		return fmt.Errorf("unknown config key: %s\nSupported keys: %s\nProvider fields: api_key, api_key_cmd, url, protocol, model, models, auth_header, timeout_sec, extra_body, extra_headers, retry_codes, aws_region, aws_profile\nProtocol values: anthropic, anthropic-bedrock, openai, openai-responses\nMCP server fields: type, command, args, env, url, headers, tools, setup", key, strings.Join(supportedConfigKeys, ", "))
+		return fmt.Errorf("unknown config key: %s\nSupported keys: %s\nProvider fields: api_key, api_key_cmd, url, protocol, model, models, auth_header, timeout_sec, extra_body, extra_headers, retry_codes, aws_region, aws_profile\nProtocol values: anthropic, anthropic-bedrock, openai, openai-responses, host-agent\nMCP server fields: type, command, args, env, url, headers, tools, setup\nHost agent fields: command, args, env", key, strings.Join(supportedConfigKeys, ", "))
 	}
 	return nil
 }

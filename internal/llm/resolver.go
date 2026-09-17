@@ -44,6 +44,12 @@ type ResolvedEndpoint struct {
 	// providers. Empty means "let the AWS SDK decide".
 	AWSProfile string
 	AWSRegion  string
+
+	// AgentCommand, AgentArgs, and AgentEnv configure the host-agent
+	// subprocess. Empty for every other protocol.
+	AgentCommand string
+	AgentArgs    []string
+	AgentEnv     []string
 }
 
 // Environment variable names for OCR-specific configuration.
@@ -77,6 +83,7 @@ const (
 type ResolveOptions struct {
 	Provider string
 	Model    string
+	Agent    string
 }
 
 // ResolveEndpoint resolves an endpoint without per-run overrides.
@@ -96,6 +103,7 @@ func ResolveEndpointWithModelOverride(configPath, modelOverride string) (Resolve
 func ResolveEndpointWithOptions(configPath string, opts ResolveOptions) (ResolvedEndpoint, error) {
 	opts.Provider = strings.TrimSpace(opts.Provider)
 	opts.Model = strings.TrimSpace(opts.Model)
+	opts.Agent = strings.TrimSpace(opts.Agent)
 
 	// The global env overrides are parsed before any strategy runs, even though
 	// they are applied to the endpoint afterwards. Parsing them inside
@@ -106,6 +114,18 @@ func ResolveEndpointWithOptions(configPath string, opts ResolveOptions) (Resolve
 	env, err := parseEnvOverrides()
 	if err != nil {
 		return ResolvedEndpoint{}, err
+	}
+
+	if opts.Agent != "" && opts.Provider != "" {
+		return ResolvedEndpoint{}, fmt.Errorf("--agent and --provider are mutually exclusive")
+	}
+
+	if opts.Agent != "" {
+		ep, err := tryHostAgentConfig(configPath, opts)
+		if err != nil {
+			return ResolvedEndpoint{}, fmt.Errorf("resolve OCR config file: %w", err)
+		}
+		return finalizeResolvedEndpoint("OCR config file", ep, env), nil
 	}
 
 	if opts.Provider != "" {
@@ -247,6 +267,16 @@ func errBedrockNotConfigurable(key string) error {
 		key, ProtocolAnthropicBedrock)
 }
 
+// errHostAgentNotConfigurable explains why the url+token strategies reject the
+// host-agent protocol. Host-agent endpoints are named entries under
+// host_agents, selected with --agent, and carry a command rather than a URL
+// or token. Accepting the value on a url+token block would switch transports
+// and silently ignore the rest of the block.
+func errHostAgentNotConfigurable(key string) error {
+	return fmt.Errorf("%s cannot be %q: host-agent endpoints are configured under host_agents and selected with --agent, so they have no use for a url or a token",
+		key, ProtocolHostAgent)
+}
+
 // tryOCREnv reads OCR-specific environment variables.
 func tryOCREnv(modelOverride string) (ResolvedEndpoint, bool, error) {
 	url := os.Getenv(envOCRLLMURL)
@@ -268,6 +298,9 @@ func tryOCREnv(modelOverride string) (ResolvedEndpoint, bool, error) {
 		}
 		if protocol == ProtocolAnthropicBedrock {
 			return ResolvedEndpoint{}, false, fmt.Errorf("OCR environment: %w", errBedrockNotConfigurable(envOCRLLMProtocol))
+		}
+		if protocol == ProtocolHostAgent {
+			return ResolvedEndpoint{}, false, fmt.Errorf("OCR environment: %w", errHostAgentNotConfigurable(envOCRLLMProtocol))
 		}
 	}
 	if protocol == "" {
@@ -335,12 +368,20 @@ type providerEntryConfig struct {
 	AWSRegion  string `json:"aws_region,omitempty"`
 }
 
+// hostAgentFileConfig is one named entry under host_agents in config.json.
+type hostAgentFileConfig struct {
+	Command string   `json:"command,omitempty"`
+	Args    []string `json:"args,omitempty"`
+	Env     []string `json:"env,omitempty"`
+}
+
 type configFile struct {
 	Provider        string                         `json:"provider,omitempty"`
 	Model           string                         `json:"model,omitempty"`
 	Providers       map[string]providerEntryConfig `json:"providers,omitempty"`
 	CustomProviders map[string]providerEntryConfig `json:"custom_providers,omitempty"`
 	Llm             llmFileConfig                  `json:"llm,omitempty"`
+	HostAgents      map[string]hostAgentFileConfig `json:"host_agents,omitempty"`
 }
 
 // tryOCRConfig reads the OCR config file.
@@ -369,6 +410,53 @@ func tryOCRConfig(path string, opts ResolveOptions) (ResolvedEndpoint, bool, err
 	}
 
 	return tryLegacyLlmConfig(cfg, opts.Model)
+}
+
+// tryHostAgentConfig resolves a named host-agent entry from config.json.
+// --agent is exclusive: a missing name, empty command, or missing model is a
+// hard error rather than a fall-through to later strategies.
+func tryHostAgentConfig(path string, opts ResolveOptions) (ResolvedEndpoint, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return ResolvedEndpoint{}, fmt.Errorf("agent %q is not configured in host_agents section because the config file does not exist", opts.Agent)
+		}
+		return ResolvedEndpoint{}, err
+	}
+
+	var cfg configFile
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return ResolvedEndpoint{}, fmt.Errorf("parse config: %w", err)
+	}
+
+	entry, ok := cfg.HostAgents[opts.Agent]
+	if !ok {
+		return ResolvedEndpoint{}, fmt.Errorf("agent %q is not configured in host_agents section", opts.Agent)
+	}
+
+	command := strings.TrimSpace(entry.Command)
+	if command == "" {
+		return ResolvedEndpoint{}, fmt.Errorf("agent %q has no command configured in host_agents", opts.Agent)
+	}
+
+	model := opts.Model
+	if model == "" {
+		model = cfg.Model
+	}
+	if strings.TrimSpace(model) == "" {
+		return ResolvedEndpoint{}, fmt.Errorf("agent %q requires a model; pass --model or set model in config", opts.Agent)
+	}
+
+	return ResolvedEndpoint{
+		Model:        model,
+		Provider:     opts.Agent,
+		Protocol:     ProtocolHostAgent,
+		Source:       "host-agent:" + opts.Agent,
+		AmbientAuth:  true,
+		AgentCommand: command,
+		AgentArgs:    append([]string(nil), entry.Args...),
+		AgentEnv:     append([]string(nil), entry.Env...),
+	}, nil
 }
 
 // tryProviderConfig resolves an endpoint from the provider-based configuration.
@@ -460,11 +548,15 @@ func tryProviderConfig(cfg configFile, modelOverride string) (ResolvedEndpoint, 
 		if err := ValidateProtocol(normalized); err != nil {
 			return ResolvedEndpoint{}, false, fmt.Errorf("custom provider %q: %w", cfg.Provider, err)
 		}
-		if normalized != ProtocolAnthropicBedrock && entry.URL == "" {
+		if normalized != ProtocolAnthropicBedrock && normalized != ProtocolHostAgent && entry.URL == "" {
 			return ResolvedEndpoint{}, false, fmt.Errorf("custom provider %q requires a url field for protocol %q", cfg.Provider, normalized)
 		}
 		url = entry.URL
 		protocol = normalized
+	}
+
+	if protocol == ProtocolHostAgent {
+		return ResolvedEndpoint{}, false, fmt.Errorf("host-agent is selected with --agent <name>, not --provider; configure host_agents.<name> and pass --agent")
 	}
 
 	// Ambient auth follows the protocol actually in force, which is why this is
@@ -636,6 +728,9 @@ func tryLegacyLlmConfig(cfg configFile, modelOverride string) (ResolvedEndpoint,
 		}
 		if protocol == ProtocolAnthropicBedrock {
 			return ResolvedEndpoint{}, false, fmt.Errorf("OCR config file: %w", errBedrockNotConfigurable("llm.protocol"))
+		}
+		if protocol == ProtocolHostAgent {
+			return ResolvedEndpoint{}, false, fmt.Errorf("OCR config file: %w", errHostAgentNotConfigurable("llm.protocol"))
 		}
 	}
 	if protocol == "" {

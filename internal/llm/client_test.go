@@ -1953,6 +1953,7 @@ func TestNewLLMClient_Dispatch(t *testing.T) {
 		{"anthropic -> AnthropicClient", ProtocolAnthropic, "*llm.AnthropicClient"},
 		{"openai -> OpenAIClient", ProtocolOpenAIChatCompletions, "*llm.OpenAIClient"},
 		{"openai-responses -> OpenAIResponsesClient", ProtocolOpenAIResponses, "*llm.OpenAIResponsesClient"},
+		{"host-agent -> HostAgentClient", ProtocolHostAgent, "*llm.HostAgentClient"},
 		// Defensive default: an unnormalized/unknown protocol falls through to
 		// OpenAIClient (preserves the pre-refactor behavior where any
 		// non-anthropic protocol meant OpenAI).
@@ -1989,6 +1990,34 @@ func TestNewLLMClient_OpenAIAliasDispatchesToOpenAIClient(t *testing.T) {
 	client := NewLLMClient(ep, nil, nil)
 	if got := typeName(client); got != "*llm.OpenAIClient" {
 		t.Errorf("NormalizeProtocol(\"openai\") dispatched to %s, want *llm.OpenAIClient", got)
+	}
+}
+
+func TestNewLLMClient_HostAgentWiresCLITransport(t *testing.T) {
+	ep := ResolvedEndpoint{
+		Protocol:     ProtocolHostAgent,
+		AgentCommand: "claude",
+		AgentArgs:    []string{"--foo"},
+		AgentEnv:     []string{"FOO=bar"},
+		Model:        "claude-opus-4-6",
+	}
+	client := NewLLMClient(ep, nil, nil)
+	ha, ok := client.(*HostAgentClient)
+	if !ok {
+		t.Fatalf("NewLLMClient = %T, want *HostAgentClient", client)
+	}
+	tr, ok := ha.transport.(*cliTransport)
+	if !ok {
+		t.Fatalf("transport = %T, want *cliTransport", ha.transport)
+	}
+	if tr.command != "claude" {
+		t.Errorf("command = %q, want claude", tr.command)
+	}
+	if len(tr.extraArgs) != 1 || tr.extraArgs[0] != "--foo" {
+		t.Errorf("extraArgs = %v, want [--foo]", tr.extraArgs)
+	}
+	if len(tr.extraEnv) != 1 || tr.extraEnv[0] != "FOO=bar" {
+		t.Errorf("extraEnv = %v, want [FOO=bar]", tr.extraEnv)
 	}
 }
 
