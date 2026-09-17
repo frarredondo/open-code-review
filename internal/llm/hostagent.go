@@ -58,8 +58,36 @@ func (c *HostAgentClient) CompletionsWithCtx(ctx context.Context, req ChatReques
 	if err != nil {
 		return nil, err
 	}
-	resp.Usage = usage
+	if usage != nil {
+		resp.Usage = usage
+	} else {
+		resp.Usage = estimateHostAgentUsage(req.Messages, resp)
+	}
 	return resp, nil
+}
+
+// estimateHostAgentUsage is the tiktoken fallback used when a HostAgentTransport
+// reports no usage. Distinct from the pass-through of harness-reported
+// UsageInfo: these numbers are estimated from the request and response text,
+// cache fields stay 0, and they exist so llmloop's budget counters are not
+// left at zero.
+func estimateHostAgentUsage(messages []Message, resp *ChatResponse) *UsageInfo {
+	var prompt int64
+	for _, m := range messages {
+		prompt += int64(CountTokens(m.ExtractText()))
+	}
+	var completion int64
+	if resp != nil {
+		completion += int64(CountTokens(resp.VisibleContent()))
+		for _, tc := range resp.ToolCalls() {
+			completion += int64(CountTokens(tc.Function.Arguments))
+		}
+	}
+	return &UsageInfo{
+		PromptTokens:     prompt,
+		CompletionTokens: completion,
+		TotalTokens:      prompt + completion,
+	}
 }
 
 func splitHostAgentMessages(messages []Message) (system, prompt string) {
