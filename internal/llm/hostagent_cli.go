@@ -65,7 +65,7 @@ func (t *cliTransport) Complete(ctx context.Context, req HostAgentRequest) ([]by
 		return nil, nil, fmt.Errorf("host-agent CLI output exceeds cap")
 	}
 
-	parsed, keys, parseErr := parseHostAgentCLIStdout(stdout.buf.Bytes())
+	parsed, parseErr := parseHostAgentCLIStdout(stdout.buf.Bytes())
 	if parseErr == nil && parsed.IsError {
 		return nil, nil, fmt.Errorf("%s", parsed.errorMessage())
 	}
@@ -75,8 +75,8 @@ func (t *cliTransport) Complete(ctx context.Context, req HostAgentRequest) ([]by
 	if parseErr != nil {
 		return nil, nil, fmt.Errorf("host-agent CLI stdout is not JSON: %w", parseErr)
 	}
-	raw, ok := keys["structured_output"]
-	if !ok || len(bytes.TrimSpace(raw)) == 0 || string(raw) == "null" {
+	raw := parsed.StructuredOutput
+	if len(bytes.TrimSpace(raw)) == 0 || string(raw) == "null" {
 		return nil, nil, fmt.Errorf("host-agent CLI success response missing structured_output")
 	}
 	return append([]byte(nil), raw...), usageFromCLI(parsed.Usage), nil
@@ -93,8 +93,10 @@ func (t *cliTransport) buildArgs(req HostAgentRequest, schemaPath string) []stri
 		"--output-format", "json",
 		"--json-schema", schemaPath,
 		"--tools", "",
-		"--model", req.Model,
 	)
+	if req.Model != "" {
+		args = append(args, "--model", req.Model)
+	}
 	if req.System != "" {
 		args = append(args, "--system-prompt", req.System)
 	}
@@ -147,16 +149,12 @@ type hostAgentCLIUsage struct {
 	CacheReadInputTokens     int64 `json:"cache_read_input_tokens"`
 }
 
-func parseHostAgentCLIStdout(raw []byte) (hostAgentCLIResult, map[string]json.RawMessage, error) {
-	var keys map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &keys); err != nil {
-		return hostAgentCLIResult{}, nil, err
-	}
+func parseHostAgentCLIStdout(raw []byte) (hostAgentCLIResult, error) {
 	var parsed hostAgentCLIResult
 	if err := json.Unmarshal(raw, &parsed); err != nil {
-		return hostAgentCLIResult{}, nil, err
+		return hostAgentCLIResult{}, err
 	}
-	return parsed, keys, nil
+	return parsed, nil
 }
 
 func (r hostAgentCLIResult) errorMessage() string {

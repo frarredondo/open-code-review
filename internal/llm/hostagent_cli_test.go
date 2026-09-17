@@ -56,6 +56,9 @@ func runFakeHostAgentCLI(mode string) {
 	case "no-structured-output":
 		os.Stdout.WriteString(`{"subtype":"success","is_error":false,"result":"hello"}` + "\n")
 		os.Exit(0)
+	case "null-structured-output":
+		os.Stdout.WriteString(`{"subtype":"success","is_error":false,"structured_output":null}` + "\n")
+		os.Exit(0)
 	case "exit-empty-stderr":
 		os.Exit(1)
 	case "not-json":
@@ -125,6 +128,17 @@ func TestCLITransport_SuccessWithoutStructuredOutput(t *testing.T) {
 	_, _, err := tr.Complete(context.Background(), sampleHostAgentRequest())
 	if err == nil {
 		t.Fatal("success with no structured_output returned nil error")
+	}
+	if !strings.Contains(err.Error(), "structured_output") {
+		t.Errorf("error %q does not mention structured_output", err)
+	}
+}
+
+func TestCLITransport_NullStructuredOutput(t *testing.T) {
+	tr, _, _ := newTestCLI(t, "null-structured-output")
+	_, _, err := tr.Complete(context.Background(), sampleHostAgentRequest())
+	if err == nil {
+		t.Fatal("success with null structured_output returned nil error")
 	}
 	if !strings.Contains(err.Error(), "structured_output") {
 		t.Errorf("error %q does not mention structured_output", err)
