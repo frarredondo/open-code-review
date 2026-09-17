@@ -44,12 +44,13 @@ combination rather than picking one.
 | `host_agents.<name>.env` | Extra environment, JSON array of `KEY=VALUE`. Optional. |
 
 `args` is prepended to the argv OCR already builds (`--bare`, `-p`,
-`--output-format json`, `--json-schema <tempfile>`, `--tools ""`, plus
-`--model` and `--system-prompt` when set, and `--session-id` or
-`--resume` once a conversation id exists). Do not repeat those flags.
-Values that start with `-` need a `--` separator so `ocr config set`
-does not treat them as its own flags. `--foo` below is a placeholder
-for extra harness flags you actually need:
+`--output-format json`, `--json-schema` with the schema as an inline
+JSON string, `--tools ""`, plus `--model` and `--system-prompt` when
+set, and `--session-id` or `--resume` once a conversation id exists).
+Do not repeat those flags. Values that start with `-` need a `--`
+separator so `ocr config set` does not treat them as its own flags.
+`--foo` below is a placeholder for extra harness flags you actually
+need:
 
 ```bash
 ocr config set host_agents.claude-code.args -- '["--foo"]'
