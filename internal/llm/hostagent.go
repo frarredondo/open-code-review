@@ -42,9 +42,14 @@ func NewHostAgentClient(transport HostAgentTransport) *HostAgentClient {
 }
 
 func (c *HostAgentClient) CompletionsWithCtx(ctx context.Context, req ChatRequest) (*ChatResponse, error) {
+	system, prompt := splitHostAgentMessages(req.Messages)
 	raw, usage, err := c.transport.Complete(ctx, HostAgentRequest{
-		Prompt: promptFromMessages(req.Messages),
-		Schema: schemaForTools(req.Tools),
+		System:    system,
+		Prompt:    prompt,
+		Schema:    schemaForTools(req.Tools),
+		Model:     req.Model,
+		MaxTokens: req.MaxTokens,
+		SessionID: req.SessionID,
 	})
 	if err != nil {
 		return nil, err
@@ -57,38 +62,53 @@ func (c *HostAgentClient) CompletionsWithCtx(ctx context.Context, req ChatReques
 	return resp, nil
 }
 
-func promptFromMessages(messages []Message) string {
-	var b strings.Builder
-	for i, m := range messages {
-		if i > 0 {
-			b.WriteByte('\n')
+func splitHostAgentMessages(messages []Message) (system, prompt string) {
+	var sys, conv strings.Builder
+	sysN, convN := 0, 0
+	for _, m := range messages {
+		if m.Role == "system" {
+			if sysN > 0 {
+				sys.WriteByte('\n')
+			}
+			sys.WriteString(m.ExtractText())
+			sysN++
+			continue
 		}
-		b.WriteString(m.Role)
-		b.WriteString(": ")
-		b.WriteString(m.ExtractText())
-		for _, tc := range m.ToolCalls {
-			b.WriteString("\ntool_call ")
-			b.WriteString(tc.Function.Name)
-			b.WriteString(" ")
-			b.WriteString(tc.Function.Arguments)
+		if convN > 0 {
+			conv.WriteByte('\n')
 		}
-		if m.ToolCallID != "" {
-			b.WriteString(" tool_call_id=")
-			b.WriteString(m.ToolCallID)
-		}
+		writeConversationMessage(&conv, m)
+		convN++
 	}
-	return b.String()
+	return sys.String(), conv.String()
+}
+
+func writeConversationMessage(b *strings.Builder, m Message) {
+	b.WriteString(m.Role)
+	b.WriteString(": ")
+	b.WriteString(m.ExtractText())
+	for _, tc := range m.ToolCalls {
+		b.WriteString("\ntool_call ")
+		b.WriteString(tc.Function.Name)
+		b.WriteString(" ")
+		b.WriteString(tc.Function.Arguments)
+	}
+	if m.ToolCallID != "" {
+		b.WriteString(" tool_call_id=")
+		b.WriteString(m.ToolCallID)
+	}
 }
 
 func schemaForTools(tools []ToolDef) map[string]any {
-	branches := make([]any, 0, len(tools)+1)
+	toolBranches := make([]any, 0, len(tools))
 	for _, tool := range tools {
 		var arguments any = tool.Function.Parameters
 		if tool.Function.Parameters == nil {
-			arguments = nil
+			arguments = map[string]any{"type": "object"}
 		}
-		branches = append(branches, map[string]any{
-			"type": "object",
+		toolBranches = append(toolBranches, map[string]any{
+			"type":                 "object",
+			"additionalProperties": false,
 			"properties": map[string]any{
 				"tool":      map[string]any{"const": tool.Function.Name},
 				"arguments": arguments,
@@ -96,13 +116,25 @@ func schemaForTools(tools []ToolDef) map[string]any {
 			"required": []string{"tool", "arguments"},
 		})
 	}
+	branches := make([]any, 0, len(toolBranches)+2)
+	branches = append(branches, toolBranches...)
 	branches = append(branches, map[string]any{
-		"type": "object",
+		"type":                 "object",
+		"additionalProperties": false,
 		"properties": map[string]any{
 			"text": map[string]any{"type": "string"},
 		},
 		"required": []string{"text"},
 	})
+	if len(toolBranches) > 0 {
+		branches = append(branches, map[string]any{
+			"type":     "array",
+			"minItems": 1,
+			"items": map[string]any{
+				"oneOf": toolBranches,
+			},
+		})
+	}
 	return map[string]any{
 		"$schema": "http://json-schema.org/draft-07/schema#",
 		"oneOf":   branches,
