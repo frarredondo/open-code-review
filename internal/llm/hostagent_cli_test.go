@@ -56,6 +56,7 @@ func runFakeHostAgentCLI(mode string) {
 	if p := os.Getenv(hostAgentCLIPidFileEnv); p != "" {
 		_ = os.WriteFile(p, []byte(strconv.Itoa(os.Getpid())), 0o600)
 	}
+	validateFakeHostAgentCLIArgs(args)
 
 	switch mode {
 	case "happy":
@@ -84,6 +85,41 @@ func runFakeHostAgentCLI(mode string) {
 	default:
 		os.Stderr.WriteString("unknown fake host-agent CLI mode\n")
 		os.Exit(2)
+	}
+}
+
+// validateFakeHostAgentCLIArgs rejects flag values the real CLI would reject.
+// --json-schema is parsed as JSON (claude --help on v2.1.274: inline schema,
+// not a path). --output-format is one of the documented choices. --tools may
+// be empty (disable all). --model, when set, must be a non-flag token.
+func validateFakeHostAgentCLIArgs(args []string) {
+	schema, ok := lookupFlag(args, "--json-schema")
+	if !ok {
+		os.Stderr.WriteString("Error: missing --json-schema\n")
+		os.Exit(1)
+	}
+	if err := json.Unmarshal([]byte(schema), new(any)); err != nil {
+		os.Stderr.WriteString("Error: --json-schema is not valid JSON:\n" + err.Error() + "\n")
+		os.Exit(1)
+	}
+
+	if format, ok := lookupFlag(args, "--output-format"); ok {
+		switch format {
+		case "text", "json", "stream-json":
+		default:
+			os.Stderr.WriteString("Error: --output-format must be text, json, or stream-json\n")
+			os.Exit(1)
+		}
+	}
+
+	if tools, ok := lookupFlag(args, "--tools"); ok && strings.HasPrefix(tools, "-") {
+		os.Stderr.WriteString("Error: --tools value looks like a flag; use \"\" to disable all tools\n")
+		os.Exit(1)
+	}
+
+	if model, ok := lookupFlag(args, "--model"); ok && (model == "" || strings.HasPrefix(model, "-")) {
+		os.Stderr.WriteString("Error: --model is empty or looks like a flag\n")
+		os.Exit(1)
 	}
 }
 
@@ -280,6 +316,40 @@ func TestCLITransport_ArgvResumeSystemPromptAndTools(t *testing.T) {
 			t.Errorf("argv %v has --model with empty Model", args)
 		}
 	})
+}
+
+func TestCLITransport_JSONSchemaIsInlineJSON(t *testing.T) {
+	tr, argvFile, _ := newTestCLI(t, "happy")
+	req := sampleHostAgentRequest()
+	req.Schema = map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"text": map[string]any{"type": "string"},
+		},
+		"required": []any{"text"},
+	}
+	if _, _, err := tr.Complete(context.Background(), req); err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	raw, ok := lookupFlag(readArgv(t, argvFile), "--json-schema")
+	if !ok {
+		t.Fatal("argv missing --json-schema")
+	}
+	var got any
+	if err := json.Unmarshal([]byte(raw), &got); err != nil {
+		t.Fatalf("--json-schema is not JSON %q: %v", raw, err)
+	}
+	wantJSON, err := json.Marshal(req.Schema)
+	if err != nil {
+		t.Fatalf("marshal want schema: %v", err)
+	}
+	gotJSON, err := json.Marshal(got)
+	if err != nil {
+		t.Fatalf("marshal got schema: %v", err)
+	}
+	if string(gotJSON) != string(wantJSON) {
+		t.Errorf("--json-schema = %s, want %s", gotJSON, wantJSON)
+	}
 }
 
 func TestCLITransport_SessionIDFirstThenResume(t *testing.T) {
@@ -489,16 +559,21 @@ func sessionFlag(args []string) (flag, value string) {
 	}
 }
 
-func flagValue(args []string, flag string) string {
+func lookupFlag(args []string, flag string) (string, bool) {
 	for i, a := range args {
 		if a == flag {
 			if i+1 < len(args) {
-				return args[i+1]
+				return args[i+1], true
 			}
-			return ""
+			return "", true
 		}
 	}
-	return ""
+	return "", false
+}
+
+func flagValue(args []string, flag string) string {
+	v, _ := lookupFlag(args, flag)
+	return v
 }
 
 func assertSessionStart(t *testing.T, args []string, id string) {
