@@ -90,8 +90,10 @@ func runFakeHostAgentCLI(mode string) {
 
 // validateFakeHostAgentCLIArgs rejects flag values the real CLI would reject.
 // --json-schema is parsed as JSON (claude --help on v2.1.274: inline schema,
-// not a path). --output-format is one of the documented choices. --tools may
-// be empty (disable all). --model, when set, must be a non-flag token.
+// not a path). The Anthropic API then rejects a schema with no root type or
+// with top-level oneOf/allOf/anyOf. --output-format is one of the documented
+// choices. --tools may be empty (disable all). --model, when set, must be a
+// non-flag token.
 func validateFakeHostAgentCLIArgs(args []string) {
 	schema, ok := lookupFlag(args, "--json-schema")
 	if !ok {
@@ -101,6 +103,21 @@ func validateFakeHostAgentCLIArgs(args []string) {
 	if err := json.Unmarshal([]byte(schema), new(any)); err != nil {
 		os.Stderr.WriteString("Error: --json-schema is not valid JSON:\n" + err.Error() + "\n")
 		os.Exit(1)
+	}
+	var schemaObj map[string]any
+	if err := json.Unmarshal([]byte(schema), &schemaObj); err != nil {
+		os.Stderr.WriteString("API Error: 400 tools.9.custom.input_schema: input_schema.type: Field required\n")
+		os.Exit(1)
+	}
+	if _, ok := schemaObj["type"]; !ok {
+		os.Stderr.WriteString("API Error: 400 tools.9.custom.input_schema: input_schema.type: Field required\n")
+		os.Exit(1)
+	}
+	for _, k := range []string{"oneOf", "allOf", "anyOf"} {
+		if _, ok := schemaObj[k]; ok {
+			os.Stderr.WriteString("API Error: 400 tools.9.custom.input_schema: input_schema does not support oneOf, allOf, or anyOf at the top level\n")
+			os.Exit(1)
+		}
 	}
 
 	if format, ok := lookupFlag(args, "--output-format"); ok {
@@ -272,7 +289,9 @@ func TestCLITransport_ArgvResumeSystemPromptAndTools(t *testing.T) {
 		assertFlagValue(t, args, "--tools", "")
 		assertFlagValue(t, args, "--output-format", "json")
 		assertFlagValue(t, args, "--model", "opus")
-		assertHasFlag(t, args, "--bare")
+		if hasFlag(args, "--bare") {
+			t.Errorf("argv %v has --bare; it strips harness credentials", args)
+		}
 		assertHasFlag(t, args, "-p")
 		assertHasFlag(t, args, "--json-schema")
 		if hasFlag(args, "--resume") {
@@ -349,6 +368,52 @@ func TestCLITransport_JSONSchemaIsInlineJSON(t *testing.T) {
 	}
 	if string(gotJSON) != string(wantJSON) {
 		t.Errorf("--json-schema = %s, want %s", gotJSON, wantJSON)
+	}
+}
+
+func TestCLITransport_RejectsTopLevelOneOfSchema(t *testing.T) {
+	tr, _, _ := newTestCLI(t, "happy")
+	req := sampleHostAgentRequest()
+	req.Schema = map[string]any{
+		"type": "object",
+		"oneOf": []any{
+			map[string]any{"type": "object"},
+		},
+	}
+	_, _, err := tr.Complete(context.Background(), req)
+	if err == nil {
+		t.Fatal("top-level oneOf schema returned success")
+	}
+	if !strings.Contains(err.Error(), "oneOf") {
+		t.Errorf("error %q does not mention top-level oneOf", err)
+	}
+}
+
+func TestCLITransport_RejectsSchemaMissingType(t *testing.T) {
+	tr, _, _ := newTestCLI(t, "happy")
+	req := sampleHostAgentRequest()
+	req.Schema = map[string]any{
+		"properties": map[string]any{
+			"text": map[string]any{"type": "string"},
+		},
+	}
+	_, _, err := tr.Complete(context.Background(), req)
+	if err == nil {
+		t.Fatal("schema missing type returned success")
+	}
+	if !strings.Contains(err.Error(), "type") {
+		t.Errorf("error %q does not mention missing type", err)
+	}
+}
+
+func TestCLITransport_SchemaForToolsAccepted(t *testing.T) {
+	tr, _, _ := newTestCLI(t, "happy")
+	req := sampleHostAgentRequest()
+	req.Schema = schemaForTools([]ToolDef{
+		{Type: "function", Function: FunctionDef{Name: "file_read", Parameters: map[string]any{"type": "object"}}},
+	})
+	if _, _, err := tr.Complete(context.Background(), req); err != nil {
+		t.Fatalf("schemaForTools was rejected by the fake CLI: %v", err)
 	}
 }
 

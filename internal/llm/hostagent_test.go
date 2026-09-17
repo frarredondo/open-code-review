@@ -25,15 +25,27 @@ func (f *fakeTransport) Complete(ctx context.Context, req HostAgentRequest) ([]b
 	return f.raw, f.usage, f.err
 }
 
-func TestSchemaForTools_Draft07OneOf(t *testing.T) {
+func TestSchemaForTools_RootIsObjectWithResponse(t *testing.T) {
 	schema := schemaForTools(nil)
 	s, _ := schema["$schema"].(string)
 	if !strings.Contains(s, "draft-07") {
 		t.Errorf("$schema = %q, want a draft-07 schema URI", s)
 	}
-	if _, ok := schema["oneOf"]; !ok {
-		t.Fatal("schema missing oneOf")
+	if schema["type"] != "object" {
+		t.Errorf("type = %v, want object", schema["type"])
 	}
+	if schema["additionalProperties"] != false {
+		t.Errorf("additionalProperties = %v, want false", schema["additionalProperties"])
+	}
+	if !requiredHas(schema, "response") {
+		t.Errorf("required = %v, want [response]", schema["required"])
+	}
+	for _, k := range []string{"oneOf", "allOf", "anyOf"} {
+		if _, ok := schema[k]; ok {
+			t.Errorf("top-level %s is rejected by the Anthropic API", k)
+		}
+	}
+	mustResponse(t, schema)
 }
 
 func TestSchemaForTools_EveryToolDefShapeGetsABranch(t *testing.T) {
@@ -65,7 +77,7 @@ func TestSchemaForTools_EveryToolDefShapeGetsABranch(t *testing.T) {
 	}
 
 	schema := schemaForTools(tools)
-	branches := oneOfBranches(t, schema)
+	branches := oneOfBranches(t, mustResponse(t, schema))
 	wantLen := len(tools) + 2 // one per tool, text, and array
 	if len(branches) != wantLen {
 		t.Errorf("oneOf len = %d, want %d (one per tool, text, and array)", len(branches), wantLen)
@@ -121,7 +133,7 @@ func TestSchemaForTools_BranchesForbidAdditionalProperties(t *testing.T) {
 	schema := schemaForTools([]ToolDef{
 		{Type: "function", Function: FunctionDef{Name: "file_read", Parameters: map[string]any{"type": "object"}}},
 	})
-	for i, branch := range oneOfBranches(t, schema) {
+	for i, branch := range oneOfBranches(t, mustResponse(t, schema)) {
 		if branch["type"] == "array" {
 			items, _ := branch["items"].(map[string]any)
 			for j, item := range oneOfBranches(t, items) {
@@ -167,7 +179,7 @@ func TestSchemaAndResponse_MultiToolCallUniqueIDs(t *testing.T) {
 		}
 	}
 
-	raw := []byte(`[
+	raw := wrapped(`[
 		{"tool":"file_read","arguments":{"path":"a.go"}},
 		{"tool":"file_find","arguments":{"glob":"*.go"}}
 	]`)
@@ -195,7 +207,7 @@ func TestSchemaAndResponse_MultiToolCallUniqueIDs(t *testing.T) {
 }
 
 func TestResponseToChat_ToolBranchOneChoice(t *testing.T) {
-	raw := []byte(`{"tool":"file_read","arguments":{"path":"main.go"}}`)
+	raw := wrapped(`{"tool":"file_read","arguments":{"path":"main.go"}}`)
 	resp, err := responseToChat(raw, "host-model")
 	if err != nil {
 		t.Fatalf("responseToChat: %v", err)
@@ -231,7 +243,7 @@ func TestResponseToChat_ToolBranchOneChoice(t *testing.T) {
 }
 
 func TestResponseToChat_TextBranchZeroToolCallsNonNilContent(t *testing.T) {
-	raw := []byte(`{"text":"looks good"}`)
+	raw := wrapped(`{"text":"looks good"}`)
 	resp, err := responseToChat(raw, "host-model")
 	if err != nil {
 		t.Fatalf("responseToChat: %v", err)
@@ -275,8 +287,21 @@ func TestResponseToChat_UnrecognizedObjectError(t *testing.T) {
 	}
 }
 
+func TestResponseToChat_UnwrappedPayloadError(t *testing.T) {
+	resp, err := responseToChat([]byte(`{"text":"looks good"}`), "host-model")
+	if err == nil {
+		t.Fatal("unwrapped payload returned success, want error")
+	}
+	if resp != nil && len(resp.Choices) == 0 {
+		t.Fatal("error response still carried empty Choices; callers treat that as a recorded error")
+	}
+	if !strings.Contains(err.Error(), "response") {
+		t.Errorf("error %q does not mention the missing response field", err)
+	}
+}
+
 func TestHostAgentClient_CompletionsMapsToolCall(t *testing.T) {
-	ft := &fakeTransport{raw: []byte(`{"tool":"file_read","arguments":{"path":"x.go"}}`)}
+	ft := &fakeTransport{raw: wrapped(`{"tool":"file_read","arguments":{"path":"x.go"}}`)}
 	c := NewHostAgentClient(ft)
 	resp, err := c.CompletionsWithCtx(context.Background(), ChatRequest{
 		Model: "opus",
@@ -307,7 +332,7 @@ func TestHostAgentClient_CompletionsMapsToolCall(t *testing.T) {
 }
 
 func TestHostAgentClient_CompletionsMapsText(t *testing.T) {
-	ft := &fakeTransport{raw: []byte(`{"text":"done"}`)}
+	ft := &fakeTransport{raw: wrapped(`{"text":"done"}`)}
 	c := NewHostAgentClient(ft)
 	resp, err := c.CompletionsWithCtx(context.Background(), ChatRequest{
 		Model:    "opus",
@@ -358,7 +383,7 @@ func TestHostAgentClient_TransportError(t *testing.T) {
 
 func TestHostAgentClient_PassesUsageThrough(t *testing.T) {
 	usage := &UsageInfo{PromptTokens: 11, CompletionTokens: 7, TotalTokens: 18, CacheReadTokens: 3}
-	ft := &fakeTransport{raw: []byte(`{"text":"ok"}`), usage: usage}
+	ft := &fakeTransport{raw: wrapped(`{"text":"ok"}`), usage: usage}
 	c := NewHostAgentClient(ft)
 	resp, err := c.CompletionsWithCtx(context.Background(), ChatRequest{
 		Model:    "opus",
@@ -374,7 +399,7 @@ func TestHostAgentClient_PassesUsageThrough(t *testing.T) {
 
 func TestHostAgentClient_SynthesizesUsageWhenTransportReportsNone(t *testing.T) {
 	t.Run("text response", func(t *testing.T) {
-		ft := &fakeTransport{raw: []byte(`{"text":"looks good after a thorough review of this patch"}`)}
+		ft := &fakeTransport{raw: wrapped(`{"text":"looks good after a thorough review of this patch"}`)}
 		c := NewHostAgentClient(ft)
 		resp, err := c.CompletionsWithCtx(context.Background(), ChatRequest{
 			Model: "opus",
@@ -388,7 +413,7 @@ func TestHostAgentClient_SynthesizesUsageWhenTransportReportsNone(t *testing.T) 
 		assertSynthesizedUsage(t, resp.Usage)
 	})
 	t.Run("tool call arguments count as completion", func(t *testing.T) {
-		ft := &fakeTransport{raw: []byte(`{"tool":"file_read","arguments":{"path":"internal/llm/hostagent.go","start":1,"end":80}}`)}
+		ft := &fakeTransport{raw: wrapped(`{"tool":"file_read","arguments":{"path":"internal/llm/hostagent.go","start":1,"end":80}}`)}
 		c := NewHostAgentClient(ft)
 		resp, err := c.CompletionsWithCtx(context.Background(), ChatRequest{
 			Model: "opus",
@@ -425,7 +450,7 @@ func assertSynthesizedUsage(t *testing.T, usage *UsageInfo) {
 func TestHostAgentClient_ForwardsSchemaAndPrompt(t *testing.T) {
 	params := map[string]any{"type": "object"}
 	tools := []ToolDef{{Type: "function", Function: FunctionDef{Name: "file_read", Parameters: params}}}
-	ft := &fakeTransport{raw: []byte(`{"text":"ok"}`)}
+	ft := &fakeTransport{raw: wrapped(`{"text":"ok"}`)}
 	c := NewHostAgentClient(ft)
 	_, err := c.CompletionsWithCtx(context.Background(), ChatRequest{
 		Model:    "opus",
@@ -445,7 +470,7 @@ func TestHostAgentClient_ForwardsSchemaAndPrompt(t *testing.T) {
 }
 
 func TestHostAgentClient_ForwardsSessionMaxTokensSystemAndModel(t *testing.T) {
-	ft := &fakeTransport{raw: []byte(`{"text":"ok"}`)}
+	ft := &fakeTransport{raw: wrapped(`{"text":"ok"}`)}
 	c := NewHostAgentClient(ft)
 	_, err := c.CompletionsWithCtx(context.Background(), ChatRequest{
 		Model:     "opus",
@@ -490,6 +515,39 @@ func assertOneChoice(t *testing.T, resp *ChatResponse) {
 	}
 }
 
+func wrapped(inner string) []byte {
+	return []byte(`{"response":` + inner + `}`)
+}
+
+func requiredHas(schema map[string]any, name string) bool {
+	switch v := schema["required"].(type) {
+	case []string:
+		for _, s := range v {
+			if s == name {
+				return true
+			}
+		}
+	case []any:
+		for _, item := range v {
+			s, _ := item.(string)
+			if s == name {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func mustResponse(t *testing.T, schema map[string]any) map[string]any {
+	t.Helper()
+	props, _ := schema["properties"].(map[string]any)
+	resp, ok := props["response"].(map[string]any)
+	if !ok {
+		t.Fatal("schema missing properties.response")
+	}
+	return resp
+}
+
 func oneOfBranches(t *testing.T, schema map[string]any) []map[string]any {
 	t.Helper()
 	raw, ok := schema["oneOf"]
@@ -516,7 +574,9 @@ func oneOfBranches(t *testing.T, schema map[string]any) []map[string]any {
 }
 
 func findArrayBranch(schema map[string]any) (map[string]any, bool) {
-	raw, ok := schema["oneOf"]
+	props, _ := schema["properties"].(map[string]any)
+	resp, _ := props["response"].(map[string]any)
+	raw, ok := resp["oneOf"]
 	if !ok {
 		return nil, false
 	}
@@ -541,7 +601,7 @@ func findArrayBranch(schema map[string]any) (map[string]any, bool) {
 
 func assertToolBranch(t *testing.T, schema map[string]any, name string, wantParams map[string]any) {
 	t.Helper()
-	for _, branch := range oneOfBranches(t, schema) {
+	for _, branch := range oneOfBranches(t, mustResponse(t, schema)) {
 		props, ok := branch["properties"].(map[string]any)
 		if !ok {
 			continue
@@ -561,7 +621,7 @@ func assertToolBranch(t *testing.T, schema map[string]any, name string, wantPara
 
 func toolArguments(t *testing.T, schema map[string]any, name string) map[string]any {
 	t.Helper()
-	for _, branch := range oneOfBranches(t, schema) {
+	for _, branch := range oneOfBranches(t, mustResponse(t, schema)) {
 		props, ok := branch["properties"].(map[string]any)
 		if !ok {
 			continue
@@ -579,7 +639,7 @@ func toolArguments(t *testing.T, schema map[string]any, name string) map[string]
 
 func assertTextBranch(t *testing.T, schema map[string]any) {
 	t.Helper()
-	for _, branch := range oneOfBranches(t, schema) {
+	for _, branch := range oneOfBranches(t, mustResponse(t, schema)) {
 		props, ok := branch["properties"].(map[string]any)
 		if !ok {
 			continue
