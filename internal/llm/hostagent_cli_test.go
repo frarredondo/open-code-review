@@ -24,6 +24,7 @@ const (
 	hostAgentCLIArgvLogEnv   = "_OCR_HOSTAGENT_CLI_ARGV_LOG"
 	hostAgentCLIStdinFileEnv = "_OCR_HOSTAGENT_CLI_STDIN_FILE"
 	hostAgentCLIPidFileEnv   = "_OCR_HOSTAGENT_CLI_PID_FILE"
+	hostAgentCLIEnvFileEnv   = "_OCR_HOSTAGENT_CLI_ENV_FILE"
 )
 
 func TestMain(m *testing.M) {
@@ -55,6 +56,10 @@ func runFakeHostAgentCLI(mode string) {
 	}
 	if p := os.Getenv(hostAgentCLIPidFileEnv); p != "" {
 		_ = os.WriteFile(p, []byte(strconv.Itoa(os.Getpid())), 0o600)
+	}
+	if p := os.Getenv(hostAgentCLIEnvFileEnv); p != "" {
+		b, _ := json.Marshal(os.Environ())
+		_ = os.WriteFile(p, b, 0o600)
 	}
 	validateFakeHostAgentCLIArgs(args)
 
@@ -682,6 +687,42 @@ func TestCLITransport_SessionIDFirstThenResume(t *testing.T) {
 	})
 }
 
+func TestCLITransport_ScrubsProviderCredentialEnv(t *testing.T) {
+	t.Setenv("ANTHROPIC_API_KEY", "sk-parent")
+	t.Setenv("ANTHROPIC_AUTH_TOKEN", "token-parent")
+	t.Setenv("ANTHROPIC_BASE_URL", "https://api.example.test")
+	t.Setenv("ANTHROPIC_MODEL", "claude-parent")
+	t.Setenv("OCR_HOSTAGENT_UNRELATED", "keep-me")
+
+	t.Run("parent credentials do not reach the child", func(t *testing.T) {
+		tr, argvFile, _ := newTestCLI(t, "happy")
+		if _, _, err := tr.Complete(context.Background(), sampleHostAgentRequest()); err != nil {
+			t.Fatalf("Complete: %v", err)
+		}
+		env := readEnvDump(t, argvFile)
+		for _, key := range []string{"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "ANTHROPIC_MODEL"} {
+			if got := envValue(env, key); got != "" {
+				t.Errorf("child %s = %q, want omitted", key, got)
+			}
+		}
+		if got := envValue(env, "OCR_HOSTAGENT_UNRELATED"); got != "keep-me" {
+			t.Errorf("child OCR_HOSTAGENT_UNRELATED = %q, want keep-me", got)
+		}
+	})
+
+	t.Run("host_agents env can put a credential back", func(t *testing.T) {
+		tr, argvFile, _ := newTestCLI(t, "happy")
+		tr.extraEnv = append(tr.extraEnv, "ANTHROPIC_API_KEY=from-config")
+		if _, _, err := tr.Complete(context.Background(), sampleHostAgentRequest()); err != nil {
+			t.Fatalf("Complete: %v", err)
+		}
+		env := readEnvDump(t, argvFile)
+		if got := envValue(env, "ANTHROPIC_API_KEY"); got != "from-config" {
+			t.Errorf("child ANTHROPIC_API_KEY = %q, want from-config", got)
+		}
+	})
+}
+
 func sampleHostAgentRequest() HostAgentRequest {
 	return HostAgentRequest{
 		Prompt: "review the diff",
@@ -702,6 +743,7 @@ func newTestCLI(t *testing.T, mode string) (*cliTransport, string, string) {
 		hostAgentCLIArgvLogEnv + "=" + filepath.Join(dir, "argv.log"),
 		hostAgentCLIStdinFileEnv + "=" + stdinFile,
 		hostAgentCLIPidFileEnv + "=" + filepath.Join(dir, "pid"),
+		hostAgentCLIEnvFileEnv + "=" + filepath.Join(dir, "env.json"),
 	}
 	return tr, argvFile, stdinFile
 }
@@ -715,6 +757,30 @@ func setCLIMode(tr *cliTransport, mode string) {
 		}
 	}
 	tr.extraEnv = append(tr.extraEnv, prefix+mode)
+}
+
+func readEnvDump(t *testing.T, argvFile string) []string {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(filepath.Dir(argvFile), "env.json"))
+	if err != nil {
+		t.Fatalf("read env dump: %v", err)
+	}
+	var env []string
+	if err := json.Unmarshal(b, &env); err != nil {
+		t.Fatalf("env dump: %v", err)
+	}
+	return env
+}
+
+func envValue(env []string, key string) string {
+	prefix := key + "="
+	got := ""
+	for _, e := range env {
+		if strings.HasPrefix(e, prefix) {
+			got = strings.TrimPrefix(e, prefix)
+		}
+	}
+	return got
 }
 
 func readArgv(t *testing.T, path string) []string {
