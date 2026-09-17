@@ -65,6 +65,19 @@ func runFakeHostAgentCLI(mode string) {
 	case "error-success-subtype":
 		os.Stdout.WriteString(`{"is_error":true,"subtype":"success","terminal_reason":"api_error","result":"Not logged in · Please run /login"}` + "\n")
 		os.Exit(1)
+	case "error-with-session":
+		sid, _ := lookupFlag(args, "--session-id")
+		if sid == "" {
+			sid, _ = lookupFlag(args, "--resume")
+		}
+		payload, _ := json.Marshal(map[string]any{
+			"is_error":        true,
+			"session_id":      sid,
+			"terminal_reason": "api_error",
+			"result":          "rate limited",
+		})
+		os.Stdout.Write(append(payload, '\n'))
+		os.Exit(1)
 	case "no-structured-output":
 		os.Stdout.WriteString(`{"subtype":"success","is_error":false,"result":"hello"}` + "\n")
 		os.Exit(0)
@@ -618,6 +631,54 @@ func TestCLITransport_SessionIDFirstThenResume(t *testing.T) {
 		if starts != 2 || resumes != 0 {
 			t.Errorf("starts=%d resumes=%d, want 2 and 0 (log=%v)", starts, resumes, dumps)
 		}
+	})
+
+	t.Run("is_error with session_id marks the id started", func(t *testing.T) {
+		tr, argvFile, _ := newTestCLI(t, "error-with-session")
+		req := sampleHostAgentRequest()
+		req.SessionID = idA
+		if _, _, err := tr.Complete(context.Background(), req); err == nil {
+			t.Fatal("is_error Complete succeeded")
+		}
+		assertSessionStart(t, readArgv(t, argvFile), idA)
+
+		setCLIMode(tr, "happy")
+		if _, _, err := tr.Complete(context.Background(), req); err != nil {
+			t.Fatalf("retry Complete: %v", err)
+		}
+		assertSessionResume(t, readArgv(t, argvFile), idA)
+	})
+
+	t.Run("unparseable stdout does not mark the id started", func(t *testing.T) {
+		tr, argvFile, _ := newTestCLI(t, "not-json")
+		req := sampleHostAgentRequest()
+		req.SessionID = idA
+		if _, _, err := tr.Complete(context.Background(), req); err == nil {
+			t.Fatal("non-JSON Complete succeeded")
+		}
+		assertSessionStart(t, readArgv(t, argvFile), idA)
+
+		setCLIMode(tr, "happy")
+		if _, _, err := tr.Complete(context.Background(), req); err != nil {
+			t.Fatalf("retry Complete: %v", err)
+		}
+		assertSessionStart(t, readArgv(t, argvFile), idA)
+	})
+
+	t.Run("process that fails to start does not mark the id started", func(t *testing.T) {
+		tr, argvFile, _ := newTestCLI(t, "happy")
+		req := sampleHostAgentRequest()
+		req.SessionID = idA
+		tr.command = filepath.Join(t.TempDir(), "no-such-host-agent-cli")
+		if _, _, err := tr.Complete(context.Background(), req); err == nil {
+			t.Fatal("missing binary Complete succeeded")
+		}
+
+		tr.command = os.Args[0]
+		if _, _, err := tr.Complete(context.Background(), req); err != nil {
+			t.Fatalf("retry Complete: %v", err)
+		}
+		assertSessionStart(t, readArgv(t, argvFile), idA)
 	})
 }
 
