@@ -27,6 +27,17 @@ var hostAgentCLIWaitDelay = 5 * time.Second
 
 const hostAgentCLIStderrMax = 64 << 10
 
+// hostAgentCLIScrubEnv is withheld from the child so a parent shell that
+// configured OCR's managed Anthropic path cannot hijack the harness's
+// own subscription auth. Extra host_agents.<name>.env entries are
+// appended after the scrub and can put a name back.
+var hostAgentCLIScrubEnv = []string{
+	"ANTHROPIC_API_KEY",    // HTTP API key; claude prefers this over local login
+	"ANTHROPIC_AUTH_TOKEN", // token used by the Anthropic HTTP client
+	"ANTHROPIC_BASE_URL",   // would retarget the harness at another API
+	"ANTHROPIC_MODEL",      // would override the harness model aside from --model
+}
+
 // cliTransport runs a host-agent CLI (Claude Code) as a one-shot subprocess.
 // One instance is shared across concurrent group subtasks, so started
 // session ids are guarded by mu.
@@ -71,7 +82,7 @@ func (t *cliTransport) Complete(ctx context.Context, req HostAgentRequest) ([]by
 	// whole run so cancel kills the CLI. WaitDelay then unblocks Wait if a
 	// pipe-holding grandchild outlives the kill.
 	cmd := exec.CommandContext(ctx, t.command, args...)
-	cmd.Env = append(os.Environ(), t.extraEnv...)
+	cmd.Env = hostAgentCLIChildEnv(t.extraEnv)
 	cmd.Stdin = strings.NewReader(req.Prompt)
 	stdout := &cappedBuffer{max: hostAgentCLIMaxOutput}
 	stderr := &cappedBuffer{max: hostAgentCLIStderrMax}
@@ -278,4 +289,23 @@ func formatCLIExit(err error, stderr []byte) error {
 		return fmt.Errorf("host-agent CLI exited with status %d: %s", ee.ExitCode(), bytes.TrimSpace(stderr))
 	}
 	return fmt.Errorf("host-agent CLI: %w", err)
+}
+
+func hostAgentCLIChildEnv(extra []string) []string {
+	drop := make(map[string]struct{}, len(hostAgentCLIScrubEnv))
+	for _, k := range hostAgentCLIScrubEnv {
+		drop[k] = struct{}{}
+	}
+	parent := os.Environ()
+	out := make([]string, 0, len(parent)+len(extra))
+	for _, e := range parent {
+		name, _, ok := strings.Cut(e, "=")
+		if ok {
+			if _, skip := drop[name]; skip {
+				continue
+			}
+		}
+		out = append(out, e)
+	}
+	return append(out, extra...)
 }
