@@ -164,15 +164,26 @@ func schemaForTools(tools []ToolDef) map[string]any {
 		})
 	}
 	return map[string]any{
-		"$schema": "http://json-schema.org/draft-07/schema#",
-		"oneOf":   branches,
+		"$schema":              "http://json-schema.org/draft-07/schema#",
+		"type":                 "object",
+		"additionalProperties": false,
+		"required":             []string{"response"},
+		"properties": map[string]any{
+			"response": map[string]any{
+				"oneOf": branches,
+			},
+		},
 	}
 }
 
 func responseToChat(raw []byte, model string) (*ChatResponse, error) {
-	var payload any
-	if err := json.Unmarshal(raw, &payload); err != nil {
+	var envelope map[string]any
+	if err := json.Unmarshal(raw, &envelope); err != nil {
 		return nil, fmt.Errorf("host-agent response: %w", err)
+	}
+	payload, ok := envelope["response"]
+	if !ok {
+		return nil, fmt.Errorf("host-agent response: missing response")
 	}
 	choice, err := choiceFromPayload(payload)
 	if err != nil {

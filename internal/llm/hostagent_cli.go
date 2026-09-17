@@ -97,8 +97,10 @@ func (t *cliTransport) buildArgs(req HostAgentRequest, schemaJSON string) []stri
 	// enforcement lives in the aggregate token budget instead.
 	args := make([]string, 0, len(t.extraArgs)+16)
 	args = append(args, t.extraArgs...)
+	// --bare is omitted: it strips harness credentials (verified:
+	// `claude --bare -p` returns "Not logged in").
 	args = append(args,
-		"--bare", "-p",
+		"-p",
 		"--output-format", "json",
 		// --json-schema takes an inline JSON Schema string, not a path
 		// (`claude --help` on v2.1.274: `--json-schema <schema>`).

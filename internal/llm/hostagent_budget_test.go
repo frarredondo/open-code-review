@@ -26,7 +26,7 @@ func (n *nilUsageTransport) Complete(ctx context.Context, req llm.HostAgentReque
 
 func TestHostAgentClient_SynthesizedUsageReachesRunnerBudgetCounters(t *testing.T) {
 	client := llm.NewHostAgentClient(&nilUsageTransport{
-		raw: []byte(`{"tool":"task_done","arguments":{}}`),
+		raw: []byte(`{"response":{"tool":"task_done","arguments":{}}}`),
 	})
 	reg := tool.NewRegistry()
 	runner := llmloop.NewRunner(llmloop.Deps{
