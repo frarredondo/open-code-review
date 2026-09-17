@@ -39,4 +39,10 @@ func TestUnset_LoadErrors(t *testing.T) {
 			t.Fatal("expected load error, got nil")
 		}
 	})
+
+	t.Run("unsetHostAgent", func(t *testing.T) {
+		if err := unsetHostAgent(newBadConfig(t), "any"); err == nil {
+			t.Fatal("expected load error, got nil")
+		}
+	})
 }
