@@ -66,6 +66,10 @@ func addProviderFlag(cmd *cobra.Command, target *string) {
 	cmd.Flags().StringVar(target, "provider", "", "override configured LLM provider for this run")
 }
 
+func addAgentFlag(cmd *cobra.Command, target *string) {
+	cmd.Flags().StringVar(target, "agent", "", "run inference through a named host_agents entry instead of a provider")
+}
+
 func addToolsFlag(cmd *cobra.Command, target *string) {
 	cmd.Flags().StringVar(target, "tools", "", "path to JSON tools config file (default: embedded)")
 }
@@ -121,6 +125,13 @@ func validateOutputFormat(format string) (string, error) {
 	}
 }
 
+func validateAgentProviderMutex(agent, provider string) error {
+	if agent != "" && provider != "" {
+		return fmt.Errorf("--agent and --provider are mutually exclusive")
+	}
+	return nil
+}
+
 func validateReviewOptions(opts *reviewOptions) error {
 	if err := validateDiffMode(opts.from, opts.to, opts.commit); err != nil {
 		return err
@@ -158,6 +169,9 @@ func validateReviewOptions(opts *reviewOptions) error {
 			return fmt.Errorf("--effort: %w", err)
 		}
 	}
+	if err := validateAgentProviderMutex(opts.agent, opts.provider); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -184,6 +198,9 @@ func validateScanOptions(opts *scanOptions) error {
 	}
 	if opts.maxTokensBudget < 0 {
 		return fmt.Errorf("--max-tokens-budget must be a non-negative integer (0 means unlimited)")
+	}
+	if err := validateAgentProviderMutex(opts.agent, opts.provider); err != nil {
+		return err
 	}
 	return nil
 }
@@ -213,6 +230,7 @@ func registerReviewFlags(cmd *cobra.Command, opts *reviewOptions) {
 	addBackgroundFlags(cmd, &opts.background, &opts.backgroundFile)
 	addProviderFlag(cmd, &opts.provider)
 	addModelFlag(cmd, &opts.model)
+	addAgentFlag(cmd, &opts.agent)
 	cmd.Flags().StringVar(&opts.effort, "effort", "", "review effort preset: low | medium | high (\"\" = configured or default medium)")
 	cmd.RegisterFlagCompletionFunc("effort", completeEnum(template.EffortNames()...))
 	cmd.Flags().BoolVar(&opts.noFilter, "no-filter", false, "keep all review comments without LLM post-filtering")
@@ -242,6 +260,7 @@ func registerScanFlags(cmd *cobra.Command, opts *scanOptions) {
 	cmd.Flags().StringVar(&opts.batch, "batch", "", "override BATCH_STRATEGY: none | by-language | by-directory")
 	addProviderFlag(cmd, &opts.provider)
 	addModelFlag(cmd, &opts.model)
+	addAgentFlag(cmd, &opts.agent)
 	cmd.Flags().StringVar(&opts.resume, "resume", "", "resume from a previous scan session id")
 	cmd.RegisterFlagCompletionFunc("batch", completeEnum("none", "by-language", "by-directory"))
 }

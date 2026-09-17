@@ -164,6 +164,7 @@ func executeReviewContext(ctx context.Context, opts reviewOptions) (retErr error
 	rt, err := loadLLMRuntime(cc.Template, opts.toolConfigPath, llm.ResolveOptions{
 		Provider: opts.provider,
 		Model:    opts.model,
+		Agent:    opts.agent,
 	})
 	if err != nil {
 		return err
