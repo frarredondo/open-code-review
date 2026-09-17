@@ -43,7 +43,7 @@ combination rather than picking one.
 | `host_agents.<name>.args` | Extra argv, JSON array. Optional. |
 | `host_agents.<name>.env` | Extra environment, JSON array of `KEY=VALUE`. Optional. |
 
-`args` is prepended to the argv OCR already builds (`--bare`, `-p`,
+`args` is prepended to the argv OCR already builds (`-p`,
 `--output-format json`, `--json-schema` with the schema as an inline
 JSON string, `--tools ""`, plus `--model` and `--system-prompt` when
 set, and `--session-id` or `--resume` once a conversation id exists).
@@ -84,8 +84,9 @@ do.
 **Tool calls are synthesized, not native.** The harness is invoked with
 `--tools ""` and a JSON Schema. It cannot emit OCR tool-call JSON. OCR
 asks for schema-validated structured output and builds tool calls from
-that. Review quality under this path is not yet measured against the
-managed path.
+that. The schema is a root object with a `response` property; the API
+rejects `oneOf` at the top level. Review quality under this path is
+not yet measured against the managed path.
 
 **`max_tokens` is advisory.** The Claude Code CLI exposes no
 `--max-tokens` flag (verified against `claude --help` on v2.1.274), so
