@@ -372,6 +372,56 @@ func TestHostAgentClient_PassesUsageThrough(t *testing.T) {
 	}
 }
 
+func TestHostAgentClient_SynthesizesUsageWhenTransportReportsNone(t *testing.T) {
+	t.Run("text response", func(t *testing.T) {
+		ft := &fakeTransport{raw: []byte(`{"text":"looks good after a thorough review of this patch"}`)}
+		c := NewHostAgentClient(ft)
+		resp, err := c.CompletionsWithCtx(context.Background(), ChatRequest{
+			Model: "opus",
+			Messages: []Message{
+				{Role: "user", Content: "please review this substantial patch for correctness and safety"},
+			},
+		})
+		if err != nil {
+			t.Fatalf("CompletionsWithCtx: %v", err)
+		}
+		assertSynthesizedUsage(t, resp.Usage)
+	})
+	t.Run("tool call arguments count as completion", func(t *testing.T) {
+		ft := &fakeTransport{raw: []byte(`{"tool":"file_read","arguments":{"path":"internal/llm/hostagent.go","start":1,"end":80}}`)}
+		c := NewHostAgentClient(ft)
+		resp, err := c.CompletionsWithCtx(context.Background(), ChatRequest{
+			Model: "opus",
+			Messages: []Message{
+				{Role: "user", Content: "please review this substantial patch for correctness and safety"},
+			},
+		})
+		if err != nil {
+			t.Fatalf("CompletionsWithCtx: %v", err)
+		}
+		assertSynthesizedUsage(t, resp.Usage)
+	})
+}
+
+func assertSynthesizedUsage(t *testing.T, usage *UsageInfo) {
+	t.Helper()
+	if usage == nil {
+		t.Fatal("Usage is nil; budget counters would stay at zero")
+	}
+	if usage.PromptTokens == 0 {
+		t.Error("PromptTokens = 0, want non-zero for a non-empty request")
+	}
+	if usage.CompletionTokens == 0 {
+		t.Error("CompletionTokens = 0, want non-zero for a non-empty response")
+	}
+	if usage.TotalTokens != usage.PromptTokens+usage.CompletionTokens {
+		t.Errorf("TotalTokens = %d, want PromptTokens+CompletionTokens = %d", usage.TotalTokens, usage.PromptTokens+usage.CompletionTokens)
+	}
+	if usage.CacheReadTokens != 0 || usage.CacheWriteTokens != 0 {
+		t.Errorf("cache fields = read %d write %d, want 0", usage.CacheReadTokens, usage.CacheWriteTokens)
+	}
+}
+
 func TestHostAgentClient_ForwardsSchemaAndPrompt(t *testing.T) {
 	params := map[string]any{"type": "object"}
 	tools := []ToolDef{{Type: "function", Function: FunctionDef{Name: "file_read", Parameters: params}}}
