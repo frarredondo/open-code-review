@@ -285,6 +285,14 @@ func unsetMCPServer(configPath, name string) error {
 	return nil
 }
 
+func unsetHostAgent(configPath, name string) error {
+	return fmt.Errorf("unset host agent: not implemented")
+}
+
+func setHostAgentValue(cfg *Config, key, value string) error {
+	return fmt.Errorf("not implemented")
+}
+
 // deleteCustomProvider removes a custom provider from cfg in memory.
 // Returns true if the deleted provider was the active one.
 func deleteCustomProvider(cfg *Config, name string) (bool, error) {
@@ -347,6 +355,15 @@ type MCPServerConfig struct {
 	Setup   string            `json:"setup,omitempty"`
 }
 
+// HostAgentConfig holds configuration for a named local CLI harness.
+// Command is an executable OCR will spawn; it is read only from the user
+// config file (~/.opencodereview/config.json), never from a repository.
+type HostAgentConfig struct {
+	Command string   `json:"command,omitempty"`
+	Args    []string `json:"args,omitempty"`
+	Env     []string `json:"env,omitempty"`
+}
+
 // Config represents the user-level configuration file (~/.opencodereview/config.json).
 type Config struct {
 	Provider        string                     `json:"provider,omitempty"`
@@ -359,6 +376,7 @@ type Config struct {
 	Language        string                     `json:"language,omitempty"`
 	Telemetry       *TelemetryConfig           `json:"telemetry,omitempty"`
 	MCPServers      map[string]MCPServerConfig `json:"mcp_servers,omitempty"`
+	HostAgents      map[string]HostAgentConfig `json:"host_agents,omitempty"`
 }
 
 type LlmConfig struct {
