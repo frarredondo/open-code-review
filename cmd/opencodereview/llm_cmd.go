@@ -50,6 +50,7 @@ var llmTestAgent string
 func init() {
 	llmCmd.AddCommand(llmTestCmd)
 	llmCmd.AddCommand(llmProvidersCmd)
+	addAgentFlag(llmTestCmd, &llmTestAgent)
 }
 
 func runLLMTest() error {
@@ -139,7 +140,9 @@ func resolveLLMTestEndpoint() (llm.ResolvedEndpoint, error) {
 	if err != nil {
 		return llm.ResolvedEndpoint{}, err
 	}
-	ep, err := llm.ResolveEndpoint(cfgPath)
+	ep, err := llm.ResolveEndpointWithOptions(cfgPath, llm.ResolveOptions{
+		Agent: llmTestAgent,
+	})
 	if err != nil {
 		return llm.ResolvedEndpoint{}, fmt.Errorf("resolve LLM endpoint: %w", err)
 	}
