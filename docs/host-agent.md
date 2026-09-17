@@ -76,6 +76,17 @@ Resulting `~/.opencodereview/config.json` shape:
 
 Omit `args` and `env` when empty.
 
+The harness uses its own authentication. OCR withholds
+`ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL`, and
+`ANTHROPIC_MODEL` from the child so a parent shell that configured
+OCR's managed Anthropic path cannot hijack the harness. To point the
+harness at a gateway, put those names back in
+`host_agents.<name>.env`:
+
+```bash
+ocr config set host_agents.claude-code.env -- '["ANTHROPIC_API_KEY=sk-..."]'
+```
+
 ## Limitations
 
 This path does not provide several things the managed HTTP providers
